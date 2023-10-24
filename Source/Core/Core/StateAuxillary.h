@@ -12,7 +12,7 @@ public:
   static void saveStateToTrainingBuffer();
   static void loadStateFromTrainingBuffer();
   static void startRecording();
-  static void stopRecording(const std::string replay_path, tm* matchDateTimeParam);
+  static void stopRecording(const std::string replay_path);
   static void endPlayback();
   static void setNetPlayControllers(NetPlay::PadMappingArray m_pad_map, NetPlay::PlayerId m_pid);
   static std::vector<int> getOurNetPlayPorts();

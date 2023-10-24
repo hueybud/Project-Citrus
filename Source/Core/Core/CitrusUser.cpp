@@ -30,11 +30,13 @@ CitrusRequest::LoginError CitrusUser::AttemptLogin()
     return CitrusRequest::LoginError::InvalidUserId;
   }
 
+
   auto res = CitrusRequest::LogInUser(userInfo.userId, userInfo.jwt);
   if (res != CitrusRequest::LoginError::NoError)
   {
     return res;
   }
+
 
   return CitrusRequest::LoginError::NoError;
   //INFO_LOG_FMT(CORE, "User discord Id is {}", readString(res, "discordId"));
@@ -82,4 +84,9 @@ bool CitrusUser::IsValidUserId(std::string userId)
   }
 
   return true;
+}
+
+CitrusUser::UserInfo CitrusUser::GetUserInfo()
+{
+  return userInfo;
 }

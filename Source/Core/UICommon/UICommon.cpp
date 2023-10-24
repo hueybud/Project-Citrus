@@ -285,12 +285,19 @@ void SetUserDirectory(std::string custom_path)
   bool my_documents_found =
       SUCCEEDED(SHGetKnownFolderPath(FOLDERID_Documents, KF_FLAG_DEFAULT, nullptr, &my_documents));
 
+  // After PR 10708, dolphin is defaulting to AppData as the user folder if they do not have an established
+  // user folder already in My Documents
+  // https://github.com/dolphin-emu/dolphin/pull/10708
+  // This is accomplished by updating the User Config key in Registry to point to AppData
+  // To circumvent this, we need to priortize the My Documents folder over the registry key option in the
+  // if-else flow
+
   if (local)  // Case 1-2
     user_path = File::GetExeDirectory() + DIR_SEP USERDATA_DIR DIR_SEP;
-  else if (configPath)  // Case 3
-    user_path = TStrToUTF8(configPath.get());
   else if (my_documents_found)  // Case 4
     user_path = TStrToUTF8(my_documents) + DIR_SEP "Dolphin Emulator" DIR_SEP;
+  else if (configPath)  // Case 3
+    user_path = TStrToUTF8(configPath.get());
   else  // Case 5
     user_path = File::GetExeDirectory() + DIR_SEP USERDATA_DIR DIR_SEP;
 

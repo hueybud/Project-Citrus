@@ -2,12 +2,14 @@
 #include "HttpRequest.h"
 #include <picojson.h>
 #include "Logging/Log.h"
+#include <Core/Metadata.h>
 
 static bool PROD_ENABLED = false;
 
 static Common::HttpRequest::Headers headers = {
     {"user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like "
-                   "Gecko) Chrome/97.0.4692.71 Safari/537.36"}};
+                   "Gecko) Chrome/97.0.4692.71 Safari/537.36"},
+    {"content-type", "application/json"}};
 
 std::map<CitrusRequest::LoginError, std::string> CitrusRequest::loginErrorMap = {
     {CitrusRequest::LoginError::NoUserFile, "No user file found"},
@@ -62,11 +64,37 @@ CitrusRequest::LoginError CitrusRequest::LogInUser(std::string userId, std::stri
   }
   picojson::object obj = json.get<picojson::object>();
 
-  if (obj["valid"].get<std::string>() == "true")
+  // Technically someone can intercept this response with Fiddler or a similar app and change the "valid" value to true
+  // even if they use the wrong log in
+  // However, we authenticate server side when they send a request to submit match info anyways
+  // and will not take the data if the jwt does not validate with the user id and private-key signing
+  // So this is really just a preliminary auth check for 99.99% of users (looking at you, Wes)
+  if (obj["valid"].get<bool>() == true)
   {
     INFO_LOG_FMT(COMMON, "Login successful");
     return LoginError::NoError;
   }
 
   return LoginError::ServerError;
+}
+
+void CitrusRequest::SendMatchStats(std::string matchJSON)
+{
+  Common::HttpRequest req{std::chrono::seconds{3}};
+
+  picojson::object jsonRequestObj;
+
+  jsonRequestObj["userId"] = picojson::value(Metadata::getCitrusUser().GetUserInfo().userId);
+  jsonRequestObj["jwt"] = picojson::value(Metadata::getCitrusUser().GetUserInfo().jwt);
+  jsonRequestObj["matchData"] = picojson::value(matchJSON);
+  std::string playerIdString = "";
+
+  //jsonRequestObj["players"] = picojson::value(&Metadata::getPlayerArray()[0]);
+
+  std::string jsonRequestString = picojson::value(jsonRequestObj).serialize();
+
+  std::string requestURL = GetCurrentBaseURL() + "/citrus/" + "submitMatchData";
+  req.Post(requestURL, jsonRequestString, headers, Common::HttpRequest::AllowedReturnCodes::All,
+           true);
+  INFO_LOG_FMT(COMMON, "Submitted match data");
 }

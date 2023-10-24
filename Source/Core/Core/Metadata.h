@@ -10,7 +10,7 @@ class Metadata
 public:
   static std::string getJSONString();
   static void writeJSON(std::string jsonString, bool callBatch = true);
-  static void setMatchMetadata(tm* matchDateTimeParam);
+  static void setMatchMetadata();
   static void setPlayerName(std::string playerNameParam);
   static void setPlayerArray(std::vector<const NetPlay::Player*>);
   static void setNetPlayControllers(NetPlay::PadMappingArray m_pad_map);
@@ -18,12 +18,17 @@ public:
   static std::vector<const NetPlay::Player*> getPlayerArray();
   static NetPlay::PadMappingArray getControllers();
   static void setNetPlayRoomCode(std::string roomIDParam);
+  static void setGameCount(int gameCountParam);
+  static void setCitrusUser(CitrusUser citrusUserParam);
+  static void setMatchDateString();
   static int getMatchMode();
   static int getLeftSideCaptainID();
   static int getRightSideCaptainID();
   static int getLeftSideSidekickID();
   static int getRightSideSidekickID();
   static int getStadiumID();
+  static int getGameCount();
+  static CitrusUser getCitrusUser();
 
   /*
   Game Derived Locations (we do not mark these as variables because we do not directly use them here, just in gecko codes)

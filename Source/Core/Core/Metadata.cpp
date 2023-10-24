@@ -45,6 +45,12 @@ struct MissedShots
   float ballChargeAmount;
 };
 
+struct MetadataUser
+{
+  std::string playerNameAndPort;
+  std::string playerCitrusUserId;
+};
+
 // VARIABLES
 
 static tm* matchDateTime;
@@ -60,8 +66,8 @@ static u16 controllerPort2;
 static u16 controllerPort3;
 static u16 controllerPort4;
 static std::vector<int> controllerVector(4);
-static std::vector<std::string> leftTeamPlayerNamesVector;
-static std::vector<std::string> rightTeamPlayerNamesVector;
+static std::vector<MetadataUser> leftTeamPlayerNamesVector;
+static std::vector<MetadataUser> rightTeamPlayerNamesVector;
 
 static u32 leftSideCaptainID;
 static u32 rightSideCaptainID;
@@ -117,6 +123,9 @@ static u16 rightTeamMissedShotsFlag;
 static std::vector<MissedShots> leftTeamMissedShotsVector;
 static std::vector<MissedShots> rightTeamMissedShotsVector;
 
+static int gameCount = 0;
+static CitrusUser citrusUser;
+
 // METHODS
 
 std::string Metadata::getJSONString()
@@ -139,6 +148,7 @@ std::string Metadata::getJSONString()
   json_stream << "  \"Epoch\": \"" << Common::Timer::GetTimeSinceJan1970() << "\"," << std::endl;
   json_stream << "  \"Version\": \"" << Common::GetScmDescStr() << "\"," << std::endl;
   json_stream << "  \"Room ID\": \"" << roomID << "\"," << std::endl;
+  json_stream << "  \"Game Count\": \"" << gameCount << "\"," << std::endl;
   std::string md5String = "";
   for (int i = 0; i < md5Hash.size(); i++)
   {
@@ -191,11 +201,17 @@ std::string Metadata::getJSONString()
   {
     if (i != leftTeamPlayerNamesVector.size() - 1)
     {
-      json_stream << "    [" << "\"" + leftTeamPlayerNamesVector.at(i) + "\"" << "]" << "," << std::endl;
+      json_stream << "    ["
+                  << "\"" + leftTeamPlayerNamesVector.at(i).playerNameAndPort + "\","
+                  << "\"" + leftTeamPlayerNamesVector.at(i).playerCitrusUserId + "\"" + "],"
+                  << std::endl;
     }
     else
     {
-      json_stream << "    [" << "\"" + leftTeamPlayerNamesVector.at(i) + "\"" << "]" << std::endl;
+      json_stream << "    ["
+                  << "\"" + leftTeamPlayerNamesVector.at(i).playerNameAndPort + "\","
+                  << "\"" + leftTeamPlayerNamesVector.at(i).playerCitrusUserId + "\"" + "]"
+                  << std::endl;
     }
   }
   json_stream << "  ]," << std::endl;
@@ -204,11 +220,17 @@ std::string Metadata::getJSONString()
   {
     if (i != rightTeamPlayerNamesVector.size() - 1)
     {
-      json_stream << "    [" << "\"" + rightTeamPlayerNamesVector.at(i) + "\"" << "]" << "," << std::endl;
+      json_stream << "    ["
+                  << "\"" + rightTeamPlayerNamesVector.at(i).playerNameAndPort + "\","
+                  << "\"" + rightTeamPlayerNamesVector.at(i).playerCitrusUserId + "\"" + "],"
+                  << std::endl;
     }
     else
     {
-      json_stream << "    [" << "\"" + rightTeamPlayerNamesVector.at(i) + "\"" << "]" << std::endl;
+      json_stream << "    ["
+                  << "\"" + rightTeamPlayerNamesVector.at(i).playerNameAndPort + "\","
+                  << "\"" + rightTeamPlayerNamesVector.at(i).playerCitrusUserId + "\"" + "]"
+                  << std::endl;
     }
   }
   json_stream << "  ]," << std::endl;
@@ -593,10 +615,22 @@ void Metadata::writeJSON(std::string jsonString, bool callBatch)
   }
 }
 
-void Metadata::setMatchMetadata(tm* matchDateTimeParam)
+void Metadata::setMatchDateString()
+{
+  time_t curr_time;
+  tm* curr_tm;
+  char date_string[100];
+
+  time(&curr_time);
+  curr_tm = localtime(&curr_time);
+  strftime(date_string, 50, "%B_%d_%Y_%OH_%OM_%OS", curr_tm);
+  matchDateTime = curr_tm;
+}
+
+void Metadata::setMatchMetadata()
 {
   // have consistent time across the output file and the in-json time
-  matchDateTime = matchDateTimeParam;
+  Metadata::setMatchDateString();
 
   // set match info vars
 
@@ -842,33 +876,39 @@ void Metadata::setMatchMetadata(tm* matchDateTimeParam)
         NetPlay::PlayerId pad_map_player_id = netplayGCMap[i];
         // now get the player name that matches the PID we just stored
         std::string foundPlayerName = "";
+        MetadataUser leftTeamPlayer = {};
         for (int j = 0; j < playerArray.size(); j++)
         {
           if (playerArray.at(j)->pid == pad_map_player_id)
           {
+            leftTeamPlayer.playerCitrusUserId = playerArray.at(j)->discordId;
             foundPlayerName = playerArray.at(j)->name;
             break;
           }
         }
         std::string portAndPlayerName = "P" + std::to_string(i + 1) + " - " + foundPlayerName;
-        leftTeamPlayerNamesVector.push_back(portAndPlayerName);
+        leftTeamPlayer.playerNameAndPort = portAndPlayerName;
+        leftTeamPlayerNamesVector.push_back(leftTeamPlayer);
       }
       else if (controllerVector.at(i) == 1)
       {
         // right team
         NetPlay::PlayerId pad_map_player_id = netplayGCMap[i];
         // now get the player name that matches the PID we just stored
+        MetadataUser rightTeamPlayer = {};
         std::string foundPlayerName = "";
         for (int j = 0; j < playerArray.size(); j++)
         {
           if (playerArray.at(j)->pid == pad_map_player_id)
           {
-            foundPlayerName = playerArray.at(j)->name;
+            rightTeamPlayer.playerCitrusUserId = playerArray.at(j)->discordId;
+            foundPlayerName = playerArray.at(j)->discordId;
             break;
           }
         }
         std::string portAndPlayerName = "P" + std::to_string(i + 1) + " - " + foundPlayerName;
-        rightTeamPlayerNamesVector.push_back(portAndPlayerName);
+        rightTeamPlayer.playerNameAndPort = portAndPlayerName;
+        rightTeamPlayerNamesVector.push_back(rightTeamPlayer);
       }
     }
   }
@@ -880,21 +920,21 @@ void Metadata::setMatchMetadata(tm* matchDateTimeParam)
     {
       if (controllerVector.at(i) == 0)
       {
-        leftTeamPlayerNamesVector.push_back("P" + std::to_string(i + 1) + " - " + "Local Player");
+        leftTeamPlayerNamesVector.push_back({"P" + std::to_string(i + 1) + " - " + "Local Player"});
       }
       else if (controllerVector.at(i) == 1)
       {
-        rightTeamPlayerNamesVector.push_back("P" + std::to_string(i + 1) + " - " + "Local Player");
+        rightTeamPlayerNamesVector.push_back({"P" + std::to_string(i + 1) + " - " + "Local Player"});
       }
     }
   }
   if (leftTeamPlayerNamesVector.empty())
   {
-    leftTeamPlayerNamesVector.push_back("CPU");
+    leftTeamPlayerNamesVector.push_back({"CPU"});
   }
   if (rightTeamPlayerNamesVector.empty())
   {
-    rightTeamPlayerNamesVector.push_back("CPU");
+    rightTeamPlayerNamesVector.push_back({"CPU"});
   }
 
   // account for me not having the correct goal/shot addresses for cup battles currently
@@ -1012,4 +1052,24 @@ int Metadata::getStadiumID()
   {
     return Memory::Read_U8(addressCupStadiumID);
   }
+}
+
+void Metadata::setGameCount(int gameCountParam)
+{
+  gameCount = gameCountParam;
+}
+
+int Metadata::getGameCount()
+{
+  return gameCount;
+}
+
+void Metadata::setCitrusUser(CitrusUser citrusUserParam)
+{
+  citrusUser = citrusUserParam;
+}
+
+CitrusUser Metadata::getCitrusUser()
+{
+  return citrusUser;
 }

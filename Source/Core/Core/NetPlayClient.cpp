@@ -134,16 +134,15 @@ NetPlayClient::NetPlayClient(const std::string& address, const u16 port, NetPlay
 {
   ClearBuffers();
 
-  CitrusUser ourUser;
-  auto logInResponse = ourUser.AttemptLogin(); 
+  auto logInResponse = m_citrusUser.AttemptLogin(); 
   if (logInResponse != CitrusRequest::NoError)
   {
-    // more detailed error should be filled in via a map
     m_dialog->OnLoginError(CitrusRequest::loginErrorMap.at(logInResponse));
     return;
   }
 
-  INFO_LOG_FMT(NETPLAY, "Authenticated Citrus User Id is {}", "ourUser");
+  INFO_LOG_FMT(NETPLAY, "Logged a Citrus User Id in with an id of {}", m_citrusUser.GetUserInfo().userId);
+  m_player_discordId = m_citrusUser.GetUserInfo().userId;
 
   if (!traversal_config.use_traversal)
   {
@@ -254,6 +253,7 @@ bool NetPlayClient::Connect()
   packet << Common::GetScmRevGitStr();
   packet << Common::GetNetplayDolphinVer();
   packet << m_player_name;
+  packet << m_player_discordId;
   Send(packet);
   enet_host_flush(m_client);
   sf::Packet rpac;
@@ -1852,8 +1852,22 @@ bool NetPlayClient::StartGame(const std::string& path)
     StateAuxillary::setNetPlayControllers(m_pad_map, m_pid);
     Metadata::setPlayerArray(GetPlayers());
     Metadata::setNetPlayControllers(m_pad_map);
-    const auto roomID = g_TraversalClient->GetHostID();
-    Metadata::setNetPlayRoomCode(std::string(roomID.begin(), roomID.end()));
+    Metadata::setCitrusUser(m_citrusUser);
+    if (m_local_player->pid == 1)
+    {
+      // we are the host so we can use the room ID since it will be correct
+      const auto roomID = g_TraversalClient->GetHostID();
+      INFO_LOG_FMT(NETPLAY, "The room ID is: {}",
+                   std::string(roomID.begin(), roomID.end()));
+      Metadata::setNetPlayRoomCode(std::string(roomID.begin(), roomID.end()));
+    }
+    else
+    {
+      // we have to use the host code we entered into the connect box since the variable will be incorrect
+      INFO_LOG_FMT(NETPLAY, "The room ID is: {}",
+                   Config::Get(Config::NETPLAY_HOST_CODE));
+      Metadata::setNetPlayRoomCode(Config::Get(Config::NETPLAY_HOST_CODE));
+    }
     //StatViewer::setNetPlayControllersAndPlayers(m_pad_map, GetPlayers());
     //Metadata::setPlayerName(NetPlayClient::m_player_name);
   }

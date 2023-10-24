@@ -186,6 +186,8 @@ private:
   void ChangeDisc();
   void EjectDisc();
 
+  void OpenReplaysFolder();
+
   QStringList PromptFileNames();
 
   void UpdateScreenSaverInhibition();

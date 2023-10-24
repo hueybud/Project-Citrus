@@ -20,4 +20,5 @@ public:
 
   static std::string GetCurrentBaseURL();
   static LoginError LogInUser(std::string userId, std::string jwt);
+  static void SendMatchStats(std::string matchJSON);
 };

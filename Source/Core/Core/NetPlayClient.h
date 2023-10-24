@@ -22,6 +22,7 @@
 #include "Core/NetPlayProto.h"
 #include "Core/SyncIdentifier.h"
 #include "InputCommon/GCPadStatus.h"
+#include "CitrusUser.h"
 
 class BootSessionData;
 
@@ -318,6 +319,7 @@ private:
   std::map<PlayerId, Player> m_players;
   std::string m_host_spec;
   std::string m_player_name;
+  CitrusUser m_citrusUser;
   std::string m_player_discordId = "12345";
   bool m_connecting = false;
   TraversalClient* m_traversal_client = nullptr;

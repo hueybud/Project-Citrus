@@ -312,7 +312,7 @@ void OnFrameEnd()
   if (Memory::Read_U8(Metadata::addressMatchStart) == 1)
   {
     // training mode
-    if (Memory::Read_U8(Metadata::addressCustomTrainingModeEnabled) && Metadata::getMatchMode() == 1)
+    if (Memory::Read_U8(Metadata::addressCustomTrainingModeEnabled) && Metadata::getMatchMode() == 1 && !NetPlay::IsNetPlayRunning())
     {
 
       if (!StateAuxillary::getOverwriteHomeCaptainPositionTrainingMode())
@@ -347,22 +347,26 @@ void OnFrameEnd()
       }
       return;
     }
+
     // standard grudge match/cup match replay
     if (!StateAuxillary::getBoolMatchStart() && !Movie::IsPlayingInput() &&
         !Movie::IsRecordingInput() && !StateAuxillary::isSpectator() &&
-        (Metadata::getMatchMode() == 1 || Metadata::getMatchMode() == 2) &&
-        Config::Get(Config::MAIN_REPLAYS))
+        (Metadata::getMatchMode() == 1 || Metadata::getMatchMode() == 2))
     {
       // Uncomment this in next version after revising spaces in names
-      // This version should be focused on the updater
       // StateAuxillary::setMatchPlayerNames();
       boolMatchStart = true;
       StateAuxillary::setBoolMatchStart(true);
-      // begin recording
+      Metadata::setGameCount(Metadata::getGameCount() + 1);
 
-      StateAuxillary::startRecording();
       StateAuxillary::setBoolMatchEnd(false);
       boolMatchEnd = false;
+
+      if (Config::Get(Config::MAIN_REPLAYS))
+      {
+        // begin recording
+        StateAuxillary::startRecording();
+      }
     }
     /*
     // generate random numbers and fill spots
@@ -388,43 +392,36 @@ void OnFrameEnd()
   if (Memory::Read_U8(Metadata::addressMatchEnd) == 1)
   {
     // training mode
-    if (Memory::Read_U8(Metadata::addressCustomTrainingModeEnabled))
+    if (Memory::Read_U8(Metadata::addressCustomTrainingModeEnabled) && Metadata::getMatchMode() == 1 && !NetPlay::IsNetPlayRunning())
     {
       StateAuxillary::setOverwriteHomeCaptainPositionTrainingMode(false);
       StateAuxillary::setCustomTrainingModeStart(false);
       return;
     }
 
-    if (!StateAuxillary::getBoolMatchEnd() && !Movie::IsPlayingInput() && Movie::IsRecordingInput())
+    if (!StateAuxillary::getBoolMatchEnd() && !Movie::IsPlayingInput())
     {
+      // set match metadata regardless if we are saving replay or not
+      Metadata::setMatchMetadata();
+
       StateAuxillary::setBoolMatchEnd(true);
       boolMatchEnd = true;
-      time_t curr_time;
-      tm* curr_tm;
-      char date_string[100];
-
-      time(&curr_time);
-      curr_tm = localtime(&curr_time);
-      strftime(date_string, 50, "%B_%d_%Y_%OH_%OM_%OS", curr_tm);
-      /*
-      PWSTR path;
-      SHGetKnownFolderPath(FOLDERID_Documents, KF_FLAG_DEFAULT, NULL, &path);
-      std::wstring strpath(path);
-      CoTaskMemFree(path);
-      std::string documents_file_path(strpath.begin(), strpath.end());
-      std::string replays_path = "";
-      replays_path += documents_file_path;
-      replays_path += "\\Citrus Replays";
-      // C://Users//Brian//Documents//Citrus Replays
-
-      std::string fileName = "\\output.dtm";
-      replays_path += fileName;
-      */
-      std::string uiFileName = File::GetUserPath(D_CITRUSREPLAYS_IDX) + "output.dtm";
-
-      StateAuxillary::stopRecording(uiFileName, curr_tm);
       StateAuxillary::setBoolMatchStart(false);
       boolMatchStart = false;
+
+      if (Movie::IsRecordingInput())
+      {
+        std::string uiFileName = File::GetUserPath(D_CITRUSREPLAYS_IDX) + "output.dtm";
+
+        StateAuxillary::stopRecording(uiFileName);
+      }
+
+      // Report score if ranked and netplay
+      std::string jsonString = Metadata::getJSONString();
+      if (NetPlay::IsNetPlayRunning())
+      {
+        CitrusRequest::SendMatchStats(jsonString);
+      }
     }
 
   }

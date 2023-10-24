@@ -412,6 +412,7 @@ ConnectionError NetPlayServer::OnConnect(ENetPeer* socket, sf::Packet& rpac)
 
   rpac >> player.revision;
   rpac >> player.name;
+  rpac >> player.discordId;
 
   if (StringUTF8CodePointCount(player.name) > MAX_NAME_LENGTH)
     return ConnectionError::NameTooLong;

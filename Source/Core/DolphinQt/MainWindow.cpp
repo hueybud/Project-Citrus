@@ -132,6 +132,7 @@
 // This #define within X11/X.h conflicts with our WiimoteSource enum.
 #undef None
 #endif
+#include <qdesktopservices.h>
 
 #if defined(__unix__) || defined(__unix) || defined(__APPLE__)
 void MainWindow::OnSignal()
@@ -497,6 +498,7 @@ void MainWindow::ConnectMenuBar()
   connect(m_menu_bar, &MenuBar::ChangeDisc, this, &MainWindow::ChangeDisc);
   connect(m_menu_bar, &MenuBar::BootDVDBackup, this,
           [this](const QString& drive) { StartGame(drive, ScanForSecondDisc::No); });
+  connect(m_menu_bar, &MenuBar::OpenReplaysFolder, this, &MainWindow::OpenReplaysFolder);
 
   // Emulation
   connect(m_menu_bar, &MenuBar::Pause, this, &MainWindow::Pause);
@@ -764,6 +766,14 @@ void MainWindow::ChangeDisc()
 void MainWindow::EjectDisc()
 {
   Core::RunAsCPUThread([] { DVDInterface::EjectDisc(DVDInterface::EjectCause::User); });
+}
+
+void MainWindow::OpenReplaysFolder()
+{
+  std::string path = File::GetUserPath(D_CITRUSREPLAYS_IDX);
+  INFO_LOG_FMT(COMMON, "Replays path is opening at: {}", path);
+  QUrl url = QUrl::fromLocalFile(QString::fromStdString(path));
+  QDesktopServices::openUrl(url);
 }
 
 void MainWindow::Open()
