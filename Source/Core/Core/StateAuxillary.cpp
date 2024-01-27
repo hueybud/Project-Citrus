@@ -18,6 +18,7 @@ static bool wroteCodes = false;
 static bool overwroteHomeCaptainPosTraining = false;
 static bool customTrainingModeStart = false;
 static std::vector<u8> training_mode_buffer;
+static bool isRanked = false;
 
 static NetPlay::PadMappingArray netplayGCMap;
 // even if the player is using multiple netplay ports to play, say 1 and 3, the game only needs the first one to do proper playback
@@ -384,4 +385,14 @@ bool StateAuxillary::getCustomTrainingModeStart()
 void StateAuxillary::setCustomTrainingModeStart(bool boolValue)
 {
   customTrainingModeStart = boolValue;
+}
+
+bool StateAuxillary::getIsRanked()
+{
+  return isRanked;
+}
+
+void StateAuxillary::setIsRanked(bool boolValue)
+{
+  isRanked = boolValue;
 }

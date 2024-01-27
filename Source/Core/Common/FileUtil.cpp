@@ -56,6 +56,7 @@
 #include "Common/StringUtil.h"
 #include "jni/AndroidCommon/AndroidCommon.h"
 #endif
+#include <Core/Config/MainSettings.h>
 
 #ifndef S_ISDIR
 #define S_ISDIR(m) (((m)&S_IFMT) == S_IFDIR)
@@ -1112,6 +1113,72 @@ bool ReadFileToString(const std::string& filename, std::string& str)
 
   str.resize(file.GetSize());
   return file.ReadArray(str.data(), str.size());
+}
+
+std::string GetAppDataPath()
+{
+  char* appDataPath;
+  size_t len;
+  _dupenv_s(&appDataPath, &len, "APPDATA");
+  // C:/Users/Brian/AppData/Roaming
+  std::string appDataString = appDataPath;
+  free(appDataPath);
+  return appDataString;
+}
+
+std::string GetCitrusLauncherEXEPath()
+{
+  std::string appDataPath = GetAppDataPath();
+  // C:/Users/Brian/AppData/Roaming
+  appDataPath.replace(appDataPath.find("Roaming"), sizeof("Roaming") - 1, "Local");
+  // C:/Users/Brian/AppData/Local
+  appDataPath += "\\Programs\\citruslauncher\\Citrus Launcher.exe";
+  return appDataPath;
+}
+
+static std::vector<std::string> citrusUserFilePaths = {
+    GetExeDirectory() + "\\user.json",
+    GetAppDataPath() + "\\citruslauncher" + "\\user.json"
+};
+
+// Used for telling the user where we looked for the user.json file when we didn't find it
+std::string ListPossibleCitrusUserFilePaths()
+{
+  std::string allPaths = "";
+  for (int i = 0; i < citrusUserFilePaths.size(); i++)
+  {
+    if (i == citrusUserFilePaths.size() - 1)
+    {
+      allPaths += citrusUserFilePaths.at(i);
+    }
+    else
+    {
+      allPaths += (citrusUserFilePaths.at(i) + " or ");
+    }
+  }
+  return allPaths;
+}
+
+std::string GetCitrusUserFilePath()
+{
+  // Working belief is that Citrus Launcher will put user.json at:
+  // C:\Users\Brian\AppData\Roaming\citruslauncher\dolphin\x64\user.json
+
+  // Therefore, if the user is running Dolphin from AppData as planned, then this is equivalent to the exe directory + user.json
+  // However, if they are running a manual version of it (from whereever), they should be able to pop user.json in at that directory
+  for (int i = 0; i < citrusUserFilePaths.size(); i++)
+  {
+    if (File::Exists(citrusUserFilePaths.at(i)))
+    {
+      return citrusUserFilePaths.at(i);
+    }
+  }
+
+  INFO_LOG_FMT(NETPLAY, "Notice: user.json was not found in root citrus dolphin directory or "
+                        "AppData\\Roaming\\citruslauncher");
+
+  return "";
+
 }
 
 }  // namespace File

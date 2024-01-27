@@ -67,9 +67,9 @@ public:
   virtual void OnTraversalStateChanged(TraversalClient::State state) = 0;
   virtual void OnGameStartAborted() = 0;
   virtual void OnGolferChanged(bool is_golfer, const std::string& golfer_name) = 0;
-  virtual void OnLoginError(const std::string& message) = 0;
+  virtual void OnLoginError(CitrusRequest::LoginError error) = 0;
 
-  virtual void OnRankedEnabled(bool is_ranked) = 0;
+  virtual void OnRankedChanged(bool is_ranked) = 0;
 
   virtual void OnCoinFlipResult(int coinFlip) = 0;
 
@@ -129,6 +129,7 @@ public:
   void Stop();
   bool ChangeGame(const std::string& game);
   void SendChatMessage(const std::string& msg);
+  void SendRankedState(const bool& is_ranked);
   void SendCoinFlip(int coinVal);
   void SendActiveGeckoCodes();
   void GetActiveGeckoCodes();
@@ -169,6 +170,7 @@ public:
   const PadMappingArray& GetWiimoteMapping() const;
 
   void AdjustPadBufferSize(unsigned int size);
+  void AdjustRankedBox(bool is_ranked);
 
   void SetWiiSyncData(std::unique_ptr<IOS::HLE::FS::FileSystem> fs, std::vector<u64> titles,
                       std::string redirect_folder);

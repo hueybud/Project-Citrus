@@ -27,10 +27,12 @@ public:
   static bool getBoolWroteCodes();
   static bool getOverwriteHomeCaptainPositionTrainingMode();
   static bool getCustomTrainingModeStart();
+  static bool getIsRanked();
   static void setBoolMatchStart(bool boolValue);
   static void setBoolMatchEnd(bool boolValue);
   static void setBoolWroteCodes(bool boolValue);
   static void setMatchPlayerNames();
   static void setOverwriteHomeCaptainPositionTrainingMode(bool boolValue);
   static void setCustomTrainingModeStart(bool boolValue);
+  static void setIsRanked(bool boolValue);
 };

@@ -22,6 +22,7 @@
 #include <QSplitter>
 #include <QTableWidget>
 #include <QTextBrowser>
+#include <QDialogButtonBox>
 
 #include <algorithm>
 #include <sstream>
@@ -64,6 +65,14 @@
 #include "VideoCommon/NetPlayGolfUI.h"
 #include "VideoCommon/RenderBase.h"
 #include "VideoCommon/VideoConfig.h"
+#include <Common/CitrusRequest.cpp>
+#include "Common/FileUtil.h"
+
+#ifdef _WIN32
+#include <windows.h>
+#include <shellapi.h>
+#endif
+#include <Core/StateAuxillary.h>
 
 namespace
 {
@@ -236,7 +245,7 @@ void NetPlayDialog::CreateMainLayout()
   options_widget->addWidget(m_buffer_size_box, 0, 2, Qt::AlignVCenter);
   options_widget->addWidget(m_quit_button, 0, 5, Qt::AlignVCenter | Qt::AlignRight);
   options_widget->setColumnStretch(5, 1000);
-  //options_widget->addWidget(m_ranked_box, 0, 3, Qt::AlignVCenter);
+  options_widget->addWidget(m_ranked_box, 0, 3, Qt::AlignVCenter);
   options_widget->addWidget(m_coin_flipper, 0, 4, Qt::AlignVCenter);
 
   m_main_layout->addLayout(options_widget, 2, 0, 1, -1, Qt::AlignRight);
@@ -338,7 +347,7 @@ void NetPlayDialog::ConnectWidgets()
   connect(m_buffer_size_box, qOverload<int>(&QSpinBox::valueChanged), [this](int value) {
     if (value == m_buffer_size)
       return;
-
+    INFO_LOG_FMT(NETPLAY, "State changed signal for Buffer");
     auto client = Settings::Instance().GetNetPlayClient();
     auto server = Settings::Instance().GetNetPlayServer();
     if (server && !m_host_input_authority)
@@ -348,10 +357,28 @@ void NetPlayDialog::ConnectWidgets()
   });
 
   connect(m_ranked_box, &QCheckBox::stateChanged, [this](bool is_ranked) {
+    StateAuxillary::setIsRanked(is_ranked);
+    if (is_ranked)
+    {
+      INFO_LOG_FMT(NETPLAY, "Ranked is enabled");
+      DisplayMessage(tr("Ranked Mode Enabled"), "mediumseagreen");
+    }
+    else
+    {
+      INFO_LOG_FMT(NETPLAY, "Ranked is disabled");
+      DisplayMessage(tr("Ranked Mode Disabled"), "crimson");
+    }
+    Settings::Instance().GetNetPlayClient()->SendRankedState(is_ranked);
+    /*
+
     auto client = Settings::Instance().GetNetPlayClient();
     auto server = Settings::Instance().GetNetPlayServer();
+    INFO_LOG_FMT(NETPLAY, "State changed signal for Ranked Box");
     if (server)
       server->AdjustRankedBox(is_ranked);
+    else
+      client->AdjustRankedBox(is_ranked);
+    */
   });
 
   connect(m_coin_flipper, &QPushButton::clicked, this, &NetPlayDialog::OnCoinFlip);
@@ -467,17 +494,25 @@ void NetPlayDialog::OnCoinFlipResult(int coinVal)
   }
 }
 
-void NetPlayDialog::OnRankedEnabled(bool is_ranked)
+void NetPlayDialog::OnRankedChanged(bool is_ranked)
 {
+  QueueOnObject(this, [this, is_ranked] {
+    const QSignalBlocker blocker(m_ranked_box);
+    m_ranked_box->setChecked(is_ranked);
+  });
+
+  m_current_ranked_value = is_ranked;
+  StateAuxillary::setIsRanked(is_ranked);
+
   if (is_ranked)
   {
+    INFO_LOG_FMT(NETPLAY, "Ranked is enabled");
     DisplayMessage(tr("Ranked Mode Enabled"), "mediumseagreen");
-    Core::setRankedStatus(is_ranked);
   }
   else
   {
+    INFO_LOG_FMT(NETPLAY, "Ranked is disabled");
     DisplayMessage(tr("Ranked Mode Disabled"), "crimson");
-    Core::setRankedStatus(is_ranked);
   }
 }
 
@@ -897,18 +932,17 @@ void NetPlayDialog::SetOptionsEnabled(bool enabled)
 
 void NetPlayDialog::RankedStartingMsg(bool is_ranked)
 {
+  StateAuxillary::setIsRanked(is_ranked);
   if (is_ranked)
   {
     DisplayMessage(tr("NOTE: Ranked is Enabled. Community standard gecko codes are enabled and all others are disabled. 10 "),
                    "mediumseagreen");
-    Core::setRankedStatus(is_ranked);
   }
   else
   {
     DisplayMessage(
         tr("NOTE: Ranked Mode is Disabled. Custom gecko codes may be enabled."),
         "crimson");
-    Core::setRankedStatus(is_ranked);
   }
 }
 
@@ -1088,12 +1122,83 @@ void NetPlayDialog::OnGolferChanged(const bool is_golfer, const std::string& gol
     DisplayMessage(tr("%1 is now golfing").arg(QString::fromStdString(golfer_name)), "");
 }
 
-void NetPlayDialog::OnLoginError(const std::string& message)
+void NetPlayDialog::OnLoginError(CitrusRequest::LoginError error)
 {
-  QueueOnObject(this, [this, message] {
-    ModalMessageBox::critical(this, tr("Error"),
-                              tr("Failed to login: %1").arg(tr(message.c_str())));
-  });
+  std::string userJSONPath = File::GetCitrusUserFilePath();
+  std::string citrusLauncherEXEPath = File::GetCitrusLauncherEXEPath();
+  switch (error)
+  {
+  case CitrusRequest::LoginError::ServerError:
+  {
+    ModalMessageBox::critical(
+        this, tr("Error"),
+        tr("Failed to log in: %1").arg(tr(CitrusRequest::loginErrorMap.at(error).c_str())));
+    QDialog::reject();
+    break;
+  }
+  case CitrusRequest::LoginError::InvalidLogin:
+  case CitrusRequest::LoginError::InvalidUserId:
+  {
+    // Great naming conventions coming up
+    QDialog* dialog1 = new QDialog(this);
+    dialog1->setWindowTitle(tr("Error"));
+    auto* label1 = new QLabel(
+        tr("Failed to log in: %1").arg(tr(CitrusRequest::loginErrorMap.at(error).c_str())));
+    label1->setTextFormat(Qt::RichText);
+
+    auto* buttons1 = new QDialogButtonBox;
+    auto* projectcitrus1 = buttons1->addButton(tr("Open User File"), QDialogButtonBox::AcceptRole);
+
+    connect(projectcitrus1, &QPushButton::clicked, this, [userJSONPath, dialog1]() {
+      std::string pathToAppData = "\"" + userJSONPath + "\"";
+      ShellExecuteA(NULL, "open", &pathToAppData[0], NULL, NULL, SW_HIDE);
+      dialog1->close();
+    });
+
+    auto* layout1 = new QVBoxLayout;
+    layout1->addWidget(label1);
+    dialog1->setLayout(layout1);
+    layout1->addWidget(buttons1);
+
+    dialog1->exec();
+    break;
+  }
+  case CitrusRequest::LoginError::NoUserFile:
+    QDialog* dialog = new QDialog(this);
+    dialog->setWindowTitle(tr("Error"));
+    auto* label =
+        new QLabel(tr("<h2>No user file found.</h2><h4>Launch Citrus Launcher "
+                      "to log in.</h4>"
+                      "<p>Upon opening Citrus Launcher, log in can be completed from the top-right "
+                      "of the navigation bar.</p>"
+                      "<em>Developer info: The user file was not found at either: %1 </em>")
+                       .arg(tr(File::ListPossibleCitrusUserFilePaths().c_str())));
+    label->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    label->setTextFormat(Qt::RichText);
+
+    auto* buttons = new QDialogButtonBox;
+    auto* projectcitrus =
+        buttons->addButton(tr("Launch Citrus Launcher"), QDialogButtonBox::AcceptRole);
+
+    connect(projectcitrus, &QPushButton::clicked, this, [citrusLauncherEXEPath]() {
+      std::string pathToAppData = "\"" + citrusLauncherEXEPath + "\"";
+      STARTUPINFO si;
+      PROCESS_INFORMATION pi;
+      memset(&si, 0, sizeof(si));
+      si.cb = sizeof(si);
+      CreateProcessA(NULL, &pathToAppData[0], NULL, NULL, TRUE, CREATE_NO_WINDOW, NULL, NULL,
+                     (LPSTARTUPINFOA)&si, &pi);
+    });
+
+    auto* layout = new QVBoxLayout;
+    layout->addWidget(label);
+    dialog->setLayout(layout);
+    layout->addWidget(buttons);
+
+    dialog->exec();
+    break;
+  }
+
 }
 
 bool NetPlayDialog::IsRecording()

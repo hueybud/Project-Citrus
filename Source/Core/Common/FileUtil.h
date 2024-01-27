@@ -233,6 +233,11 @@ std::string GetExeDirectory();
 bool WriteStringToFile(const std::string& filename, std::string_view str);
 bool ReadFileToString(const std::string& filename, std::string& str);
 
+std::string GetAppDataPath();
+std::string GetCitrusLauncherEXEPath();
+std::string ListPossibleCitrusUserFilePaths();
+std::string GetCitrusUserFilePath();
+
 // To deal with Windows not fully supporting UTF-8 and Android not fully supporting paths.
 template <typename T>
 void OpenFStream(T& fstream, const std::string& filename, std::ios_base::openmode openmode)

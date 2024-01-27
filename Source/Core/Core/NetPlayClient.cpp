@@ -137,12 +137,13 @@ NetPlayClient::NetPlayClient(const std::string& address, const u16 port, NetPlay
   auto logInResponse = m_citrusUser.AttemptLogin(); 
   if (logInResponse != CitrusRequest::NoError)
   {
-    m_dialog->OnLoginError(CitrusRequest::loginErrorMap.at(logInResponse));
+    m_dialog->OnLoginError(logInResponse);
     return;
   }
 
   INFO_LOG_FMT(NETPLAY, "Logged a Citrus User Id in with an id of {}", m_citrusUser.GetUserInfo().userId);
   m_player_discordId = m_citrusUser.GetUserInfo().userId;
+
 
   if (!traversal_config.use_traversal)
   {
@@ -1514,7 +1515,7 @@ void NetPlayClient::OnMD5Abort()
 void NetPlayClient::OnRankedBoxMsg(sf::Packet& packet)
 {
   packet >> m_ranked_client;
-  m_dialog->OnRankedEnabled(m_ranked_client);
+  m_dialog->OnRankedChanged(m_ranked_client);
 }
 
 void NetPlayClient::Send(const sf::Packet& packet, const u8 channel_id)
@@ -1707,6 +1708,15 @@ void NetPlayClient::SendChatMessage(const std::string& msg)
   sf::Packet packet;
   packet << MessageID::ChatMessage;
   packet << msg;
+
+  SendAsync(std::move(packet));
+}
+
+void NetPlayClient::SendRankedState(const bool& is_ranked)
+{
+  sf::Packet packet;
+  packet << MessageID::RankedBox;
+  packet << is_ranked;
 
   SendAsync(std::move(packet));
 }
@@ -2701,6 +2711,12 @@ void NetPlayClient::AdjustPadBufferSize(const unsigned int size)
 {
   m_target_buffer_size = size;
   m_dialog->OnPadBufferChanged(size);
+}
+
+void NetPlayClient::AdjustRankedBox(const bool is_ranked)
+{
+  m_ranked_client = is_ranked;
+  m_dialog->OnRankedChanged(is_ranked);
 }
 
 void NetPlayClient::SetWiiSyncData(std::unique_ptr<IOS::HLE::FS::FileSystem> fs,

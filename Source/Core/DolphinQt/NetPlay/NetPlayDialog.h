@@ -72,10 +72,10 @@ public:
   void OnTraversalStateChanged(TraversalClient::State state) override;
   void OnGameStartAborted() override;
   void OnGolferChanged(bool is_golfer, const std::string& golfer_name) override;
-  void OnLoginError(const std::string& message) override;
+  void OnLoginError(CitrusRequest::LoginError error) override;
 
   void RankedStartingMsg(bool is_ranked);
-  void OnRankedEnabled(bool is_ranked);
+  void OnRankedChanged(bool is_ranked);
 
   void OnCoinFlipResult(int coinVal);
 

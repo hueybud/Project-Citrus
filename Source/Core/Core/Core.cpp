@@ -416,7 +416,7 @@ void OnFrameEnd()
         StateAuxillary::stopRecording(uiFileName);
       }
 
-      // Report score if ranked and netplay
+      // Report score if netplay is running
       std::string jsonString = Metadata::getJSONString();
       if (NetPlay::IsNetPlayRunning())
       {
@@ -1438,11 +1438,6 @@ void UpdateInputGate(bool require_focus, bool require_full_focus)
   const bool full_focus_passes =
       !require_focus || !require_full_focus || (focus_passes && Host_RendererHasFullFocus());
   ControlReference::SetInputGate(focus_passes && full_focus_passes);
-}
-
-void setRankedStatus(bool inNewStatus)
-{
-  // stub
 }
 
 }  // namespace Core

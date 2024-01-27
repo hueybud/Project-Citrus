@@ -9,7 +9,7 @@ using json = nlohmann::json;
 CitrusRequest::LoginError CitrusUser::AttemptLogin()
 {
   // check for user config file
-  std::string userConfigPath = File::GetExeDirectory() + "/" + "user.json";
+  std::string userConfigPath = File::GetCitrusUserFilePath();
 
   // make function to validate user login and return different errors
 

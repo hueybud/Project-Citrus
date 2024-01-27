@@ -1663,6 +1663,8 @@ void SaveRecording(const std::string& filename)
   std::array<u8, 11> s_ourPortInfo;
   s_ourPortInfo.fill(0);
   int portCounter = 0;
+  std::array<u8, 8> s_citrusGameId;
+  s_citrusGameId.fill(0);
   if (NetPlay::IsNetPlayRunning())
   {
     std::vector<int> ourNetPlayPorts = StateAuxillary::getOurNetPlayPorts();
@@ -1672,9 +1674,10 @@ void SaveRecording(const std::string& filename)
       s_ourPortInfo[i] = portValue;
       if (portValue)
       {
-        // we need to know what kind of controller they were using for playback purposes
+        // we need to know what kind of controller they we were using for playback purposes
         // netplay uses your si device from port 1 (index 0) so we need to use a counter that tracks
         // how many ports we've used
+
         const SerialInterface::SIDevices currentDevice =
             Config::Get(Config::GetInfoForSIDevice(static_cast<int>(portCounter)));
         s_ourPortInfo[i + 4] = currentDevice;
@@ -1686,6 +1689,21 @@ void SaveRecording(const std::string& filename)
       }
     }
     header.reserved2 = s_ourPortInfo;
+    // At 0x25 and has a max length of 8
+    std::string citrusGameId = Metadata::getCitrusGameId();
+    int indexCounter = 0;
+    for (std::string::size_type i =0; i < citrusGameId.size(); i+=2)
+    {
+      char first = citrusGameId[i];
+      char second = citrusGameId[i+1];
+      std::string zeroX = "0x";
+      std::string combinedString = zeroX + first + second;
+      auto intRepresentation = std::stol(combinedString, nullptr, 0);
+      s_citrusGameId[indexCounter] = intRepresentation;
+      indexCounter++;
+    }
+
+    header.uniqueID = s_citrusGameId;
   }
   else
   {
@@ -1705,10 +1723,24 @@ void SaveRecording(const std::string& filename)
       }
     }
     header.reserved2 = s_ourPortInfo;
+    // At 0x25 and has a max length of 8
+    std::string citrusGameId = "FFFFFFFFFF";
+    int indexCounter = 0;
+    for (std::string::size_type i = 0; i < citrusGameId.size(); i += 2)
+    {
+      char first = citrusGameId[i];
+      char second = citrusGameId[i + 1];
+      std::string zeroX = "0x";
+      std::string combinedString = zeroX + first + second;
+      auto intRepresentation = std::stol(combinedString, nullptr, 0);
+      s_citrusGameId[indexCounter] = intRepresentation;
+      indexCounter++;
+    }
+
+    header.uniqueID = s_citrusGameId;
   }
 
   // TODO
-  header.uniqueID = 0;
   // header.audioEmulator;
 
   save_record.WriteArray(&header, 1);

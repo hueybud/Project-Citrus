@@ -125,6 +125,7 @@ static std::vector<MissedShots> rightTeamMissedShotsVector;
 
 static int gameCount = 0;
 static CitrusUser citrusUser;
+static std::string citrusGameId;
 
 // METHODS
 
@@ -138,6 +139,8 @@ std::string Metadata::getJSONString()
   strftime(file_name, 50, "%B_%d_%Y_%OH_%OM_%OS", matchDateTime);
   std::string convertedDate(file_name);
   std::string file_name_string = "Game_" + convertedDate + ".cit";
+  std::string submittedBy =
+      (NetPlay::IsNetPlayRunning()) ? Metadata::getCitrusUser().GetUserInfo().userId : "Empty";
 
   std::stringstream json_stream;
   std::locale::global(std::locale("en_US.UTF-8"));
@@ -149,6 +152,9 @@ std::string Metadata::getJSONString()
   json_stream << "  \"Version\": \"" << Common::GetScmDescStr() << "\"," << std::endl;
   json_stream << "  \"Room ID\": \"" << roomID << "\"," << std::endl;
   json_stream << "  \"Game Count\": \"" << gameCount << "\"," << std::endl;
+  json_stream << "  \"Citrus Game Id\": \"" << Metadata::getCitrusGameId() << "\"," << std::endl;
+  json_stream << "  \"isRanked\": \"" << StateAuxillary::getIsRanked() << "\"," << std::endl;
+  json_stream << "  \"submittedBy\": \"" << submittedBy << "\"," << std::endl;
   std::string md5String = "";
   for (int i = 0; i < md5Hash.size(); i++)
   {
@@ -632,6 +638,8 @@ void Metadata::setMatchMetadata()
   // have consistent time across the output file and the in-json time
   Metadata::setMatchDateString();
 
+  Metadata::setCitrusGameId();
+
   // set match info vars
 
   homeTeamPossesionFrameCount = Memory::Read_U32(addressLeftTeamBallOwnedFrames);
@@ -902,7 +910,7 @@ void Metadata::setMatchMetadata()
           if (playerArray.at(j)->pid == pad_map_player_id)
           {
             rightTeamPlayer.playerCitrusUserId = playerArray.at(j)->discordId;
-            foundPlayerName = playerArray.at(j)->discordId;
+            foundPlayerName = playerArray.at(j)->name;
             break;
           }
         }
@@ -1072,4 +1080,37 @@ void Metadata::setCitrusUser(CitrusUser citrusUserParam)
 CitrusUser Metadata::getCitrusUser()
 {
   return citrusUser;
+}
+
+void Metadata::setCitrusGameId()
+{
+  // 1 - 9. Make 01, 02, 03, etc.
+  if (gameCount < 10)
+  {
+    citrusGameId = (roomID + "0" + std::to_string(gameCount));
+    return;
+  }
+  // 10 - 99. Keep as 10, 11, 12, etc.
+  if (gameCount < 100)
+  {
+    citrusGameId = (roomID + std::to_string(gameCount));
+    return;
+  }
+  // 100 - 999. Make 0100, 01011, 0102, etc.
+  if (gameCount < 1000)
+  {
+    citrusGameId = (roomID + "0" + std::to_string(gameCount));
+  }
+
+}
+
+std::string Metadata::getCitrusGameId()
+{
+  return citrusGameId;
+}
+
+u64 Metadata::getCitrusGameIdAsInt()
+{
+  u64 citrusGameIdInt = std::stol(citrusGameId, nullptr, 16);
+  return citrusGameIdInt;
 }

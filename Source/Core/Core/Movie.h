@@ -89,7 +89,7 @@ struct DTMHeader
   u64 frameCount;      // Number of frames in the recording
   u64 inputCount;      // Number of input frames in recording
   u64 lagCount;        // Number of lag frames in the recording
-  u64 uniqueID;        // (not implemented) A Unique ID comprised of: md5(time + Game ID)
+  std::array<u8, 8> uniqueID;  // (not implemented) A Unique ID comprised of: md5(time + Game ID)
   u32 numRerecords;    // Number of rerecords/'cuts' of this TAS
   std::array<char, 32> author;  // Author's name (encoded in UTF-8)
 

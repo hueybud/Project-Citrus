@@ -21,6 +21,7 @@ public:
   static void setGameCount(int gameCountParam);
   static void setCitrusUser(CitrusUser citrusUserParam);
   static void setMatchDateString();
+  static void setCitrusGameId();
   static int getMatchMode();
   static int getLeftSideCaptainID();
   static int getRightSideCaptainID();
@@ -29,6 +30,8 @@ public:
   static int getStadiumID();
   static int getGameCount();
   static CitrusUser getCitrusUser();
+  static std::string getCitrusGameId();
+  static u64 getCitrusGameIdAsInt();
 
   /*
   Game Derived Locations (we do not mark these as variables because we do not directly use them here, just in gecko codes)

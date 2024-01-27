@@ -112,6 +112,8 @@ void Init()
 
   Common::SetEnableAlert(Config::Get(Config::MAIN_USE_PANIC_HANDLERS));
   Common::SetAbortOnPanicAlert(Config::Get(Config::MAIN_ABORT_ON_PANIC_ALERT));
+  Config::SetBaseOrCurrent(Config::MAIN_CITRUS_REPLAY_PATH, File::GetUserPath(D_CITRUSREPLAYS_IDX));
+  SConfig::GetInstance().SaveSettings();
 }
 
 void Shutdown()

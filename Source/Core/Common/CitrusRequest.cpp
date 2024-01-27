@@ -4,7 +4,7 @@
 #include "Logging/Log.h"
 #include <Core/Metadata.h>
 
-static bool PROD_ENABLED = false;
+static bool PROD_ENABLED = true;
 
 static Common::HttpRequest::Headers headers = {
     {"user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like "
@@ -13,8 +13,8 @@ static Common::HttpRequest::Headers headers = {
 
 std::map<CitrusRequest::LoginError, std::string> CitrusRequest::loginErrorMap = {
     {CitrusRequest::LoginError::NoUserFile, "No user file found"},
-    {CitrusRequest::LoginError::InvalidUserId, "The user id in your user.json file is not formatted correctly."},
-    {CitrusRequest::LoginError::InvalidLogin, "Your user.json file failed to authenticate you."},
+    {CitrusRequest::LoginError::InvalidUserId, "The User ID in your user.json file is not formatted correctly. \n\nConsider logging out and logging back in via Citrus Launcher"},
+    {CitrusRequest::LoginError::InvalidLogin, "Your user.json file exists but failed to authenticate you. \n\nConsider logging out and logging back in via Citrus Launcher"},
     {CitrusRequest::LoginError::ServerError, "We encounterd an error with the server while trying to log you in."},
 };
 
@@ -22,7 +22,7 @@ std::string CitrusRequest::GetCurrentBaseURL()
 {
   if (PROD_ENABLED)
   {
-    return "https://api.mariostrikers.gg";
+    return "http://23.22.39.40:8080";
   }
 
   return "https://localhost:3000";
@@ -73,6 +73,11 @@ CitrusRequest::LoginError CitrusRequest::LogInUser(std::string userId, std::stri
   {
     INFO_LOG_FMT(COMMON, "Login successful");
     return LoginError::NoError;
+  }
+
+  if (obj["error"].get<std::string>() == "Unable to decode JWT against the private key")
+  {
+    return LoginError::InvalidLogin;
   }
 
   return LoginError::ServerError;

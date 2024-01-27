@@ -51,7 +51,7 @@ void Updater::OnUpdateAvailable(std::string info)
   // bool later = false;
   m_update_available = true;
 
-      char* appDataPath;
+  char* appDataPath;
   size_t len;
   _dupenv_s(&appDataPath, &len, "APPDATA");
   // C:/Users/Brian/AppData/Roaming
