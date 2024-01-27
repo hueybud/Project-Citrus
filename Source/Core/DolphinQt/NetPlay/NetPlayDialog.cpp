@@ -148,8 +148,8 @@ void NetPlayDialog::CreateMainLayout()
   m_menu_bar = new QMenuBar(this);
   m_ranked_box = new QCheckBox(tr("Ranked"));
   m_ranked_box->setToolTip(
-      tr("Enabling Ranked Mode will report your games to the ranked bot,\n"
-         "turn competetive gameplay settings on, and disable any extra gecko codes.\n"));
+      tr("Enabling Ranked Mode requires you to still submit your games to the ranked bot,\n"
+         "Currently, it only marks games in our database as ranked."));
 
   m_coin_flipper = new QPushButton(tr("Coin flip"));
   m_data_menu = m_menu_bar->addMenu(tr("Data"));
@@ -925,6 +925,7 @@ void NetPlayDialog::SetOptionsEnabled(bool enabled)
     m_fixed_delay_action->setEnabled(enabled);
     // m_host_input_authority_action->setEnabled(enabled);
     // m_golf_mode_action->setEnabled(enabled);
+    m_ranked_box->setEnabled(enabled);
   }
 
   m_record_input_action->setEnabled(enabled);
