@@ -143,7 +143,7 @@ NetPlayClient::NetPlayClient(const std::string& address, const u16 port, NetPlay
 
   INFO_LOG_FMT(NETPLAY, "Logged a Citrus User Id in with an id of {}", m_citrusUser.GetUserInfo().userId);
   m_player_discordId = m_citrusUser.GetUserInfo().userId;
-
+  Metadata::setGameCount(0);
 
   if (!traversal_config.use_traversal)
   {

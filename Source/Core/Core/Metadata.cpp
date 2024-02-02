@@ -1084,6 +1084,13 @@ CitrusUser Metadata::getCitrusUser()
 
 void Metadata::setCitrusGameId()
 {
+  if (!NetPlay::IsNetPlayRunning())
+  {
+    // Offline games do not have a Room Id so we will make them have a constant game id to distinguish them
+    citrusGameId = "FFFFFFFFFF";
+    return;
+  }
+
   // 1 - 9. Make 01, 02, 03, etc.
   if (gameCount < 10)
   {

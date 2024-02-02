@@ -357,6 +357,7 @@ void NetPlayDialog::ConnectWidgets()
   });
 
   connect(m_ranked_box, &QCheckBox::stateChanged, [this](bool is_ranked) {
+    m_current_ranked_value = is_ranked;
     StateAuxillary::setIsRanked(is_ranked);
     if (is_ranked)
     {
@@ -991,6 +992,13 @@ void NetPlayDialog::OnMsgPowerButton()
 void NetPlayDialog::OnPlayerConnect(const std::string& player)
 {
   DisplayMessage(tr("%1 has joined").arg(QString::fromStdString(player)), "darkcyan");
+  // If host, Call SendRankedState to send the ranked message to everyone
+  // This will probably introduce a weird UI effect where people who are up to date with the value still receive the UI update that ranked is disabled/enabled
+  if (IsHosting())
+  {
+    INFO_LOG_FMT(NETPLAY, "Non-host has joined -- sending the current ranked value of {} to them", m_current_ranked_value);
+    Settings::Instance().GetNetPlayClient()->SendRankedState(m_current_ranked_value);
+  }
 }
 
 void NetPlayDialog::OnPlayerDisconnect(const std::string& player)

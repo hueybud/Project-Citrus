@@ -1689,21 +1689,6 @@ void SaveRecording(const std::string& filename)
       }
     }
     header.reserved2 = s_ourPortInfo;
-    // At 0x25 and has a max length of 8
-    std::string citrusGameId = Metadata::getCitrusGameId();
-    int indexCounter = 0;
-    for (std::string::size_type i =0; i < citrusGameId.size(); i+=2)
-    {
-      char first = citrusGameId[i];
-      char second = citrusGameId[i+1];
-      std::string zeroX = "0x";
-      std::string combinedString = zeroX + first + second;
-      auto intRepresentation = std::stol(combinedString, nullptr, 0);
-      s_citrusGameId[indexCounter] = intRepresentation;
-      indexCounter++;
-    }
-
-    header.uniqueID = s_citrusGameId;
   }
   else
   {
@@ -1723,23 +1708,23 @@ void SaveRecording(const std::string& filename)
       }
     }
     header.reserved2 = s_ourPortInfo;
-    // At 0x25 and has a max length of 8
-    std::string citrusGameId = "FFFFFFFFFF";
-    int indexCounter = 0;
-    for (std::string::size_type i = 0; i < citrusGameId.size(); i += 2)
-    {
-      char first = citrusGameId[i];
-      char second = citrusGameId[i + 1];
-      std::string zeroX = "0x";
-      std::string combinedString = zeroX + first + second;
-      auto intRepresentation = std::stol(combinedString, nullptr, 0);
-      s_citrusGameId[indexCounter] = intRepresentation;
-      indexCounter++;
-    }
-
-    header.uniqueID = s_citrusGameId;
   }
 
+  // At 0x25 and has a max length of 8
+  // Citrus Game Id is either the Netplay Room ID with the game count appended or "FFFFFFFFFF"
+  std::string citrusGameId = Metadata::getCitrusGameId();
+  int indexCounter = 0;
+  for (std::string::size_type i = 0; i < citrusGameId.size(); i += 2)
+  {
+    char first = citrusGameId[i];
+    char second = citrusGameId[i + 1];
+    std::string zeroX = "0x";
+    std::string combinedString = zeroX + first + second;
+    auto intRepresentation = std::stol(combinedString, nullptr, 0);
+    s_citrusGameId[indexCounter] = intRepresentation;
+    indexCounter++;
+  }
+  header.uniqueID = s_citrusGameId;
   // TODO
   // header.audioEmulator;
 
