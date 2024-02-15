@@ -232,6 +232,23 @@ void LoadFromBuffer(std::vector<u8>& buffer)
       true);
 }
 
+void LoadMemFromBuffer(std::vector<u8>& buffer)
+{
+  if (NetPlay::IsNetPlayRunning())
+  {
+    OSD::AddMessage("Loading savestates is disabled in Netplay to prevent desyncs");
+    return;
+  }
+
+  Core::RunOnCPUThread(
+      [&] {
+        u8* ptr = &buffer[0];
+        PointerWrap p(&ptr, PointerWrap::MODE_READ);
+        Memory::DoState(p);
+      },
+      true);
+}
+
 void SaveToBuffer(std::vector<u8>& buffer)
 {
   Core::RunOnCPUThread(
@@ -246,6 +263,24 @@ void SaveToBuffer(std::vector<u8>& buffer)
         ptr = &buffer[0];
         p.SetMode(PointerWrap::MODE_WRITE);
         DoState(p);
+      },
+      true);
+}
+
+void SaveMemToBuffer(std::vector<u8>& buffer)
+{
+  Core::RunOnCPUThread(
+      [&] {
+        u8* ptr = nullptr;
+        PointerWrap p(&ptr, PointerWrap::MODE_MEASURE);
+
+        Memory::DoState(p);
+        const size_t buffer_size = reinterpret_cast<size_t>(ptr);
+        buffer.resize(buffer_size);
+
+        ptr = &buffer[0];
+        p.SetMode(PointerWrap::MODE_WRITE);
+        Memory::DoState(p);
       },
       true);
 }

@@ -57,6 +57,7 @@ public:
   static const u32 addressLeftSideSidekickID = 0x815369f8;
   static const u32 addressRightSideSidekickID = 0x815369fc;
   static const u32 addressStadiumID = 0x81536a00;
+  static const u32 addressCharacterPointersBase = 0x8030d510;
 
   static const u32 addressLeftSideCupCaptainID = 0x8040000c;
   static const u32 addressLeftSideCupSidekickID = 0x8040000d;
@@ -66,6 +67,11 @@ public:
 
   static const u32 addressCustomTrainingModeEnabled = 0x80400011;
   static const u32 addressCustomTrainingModePossessionChange = 0x80400012;
+
+  static const u32 addressHockeyModeEnabled = 0x80400013; // 8-bit
+  // Attack is either a slide tackle or hit. It might not be a penalty since not all attacks are penalties
+  static const u32 addressHockeyModeAttackCharacterId = 0x80400014; // 32-bit
+  static const u32 addressHockeyModePenaltyFlag = 0x80400018;  // 8-bit
 
   //left team
   static const u32 addressLeftSideScore = 0x81536a56;

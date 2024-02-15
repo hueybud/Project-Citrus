@@ -8,9 +8,18 @@
 class StateAuxillary
 {
 public:
+  struct HockeyCharacterInfo
+  {
+    bool currentlyPenalized;
+    float currentlyPenalizedTimeRemaining;
+    u32 penaltyXAddress;
+    u32 penaltyYAddress;
+  };
   static void saveState(const std::string& filename, bool wait = false);
   static void saveStateToTrainingBuffer();
+  static void saveStateToTrainingBuffer2();
   static void loadStateFromTrainingBuffer();
+  static void loadStateFromTrainingBuffer2();
   static void startRecording();
   static void stopRecording(const std::string replay_path);
   static void endPlayback();
@@ -28,6 +37,10 @@ public:
   static bool getOverwriteHomeCaptainPositionTrainingMode();
   static bool getCustomTrainingModeStart();
   static bool getIsRanked();
+  static std::map<u32, HockeyCharacterInfo> getHockeyLeftTeamCharacterInfo();
+  static std::map<u32, HockeyCharacterInfo> getHockeyRightTeamCharacterInfo();
+  static int getHockeyLeftTeamTotalPenalties();
+  static int getHockeyRightTeamTotalPenalties();
   static void setBoolMatchStart(bool boolValue);
   static void setBoolMatchEnd(bool boolValue);
   static void setBoolWroteCodes(bool boolValue);
@@ -35,4 +48,10 @@ public:
   static void setOverwriteHomeCaptainPositionTrainingMode(bool boolValue);
   static void setCustomTrainingModeStart(bool boolValue);
   static void setIsRanked(bool boolValue);
+  static void setHockeyLeftTeamCharacterInfo(u32 characterPointer, HockeyCharacterInfo characterInfo);
+  static void setHockeyRightTeamCharacterInfo(u32 characterPointer, HockeyCharacterInfo characterInfo);
+  static void hockeyModeInit();
+  static void setHockeyLeftTeamTotalPenalties(int hitParam);
+  static void setHockeyRightTeamTotalPenalties(int hitParam);
+  static void updateHockeyDisplay();
 };

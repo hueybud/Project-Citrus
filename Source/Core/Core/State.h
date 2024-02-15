@@ -50,7 +50,9 @@ void SaveAs(const std::string& filename, bool wait = false);
 void LoadAs(const std::string& filename);
 
 void SaveToBuffer(std::vector<u8>& buffer);
+void SaveMemToBuffer(std::vector<u8>& buffer);
 void LoadFromBuffer(std::vector<u8>& buffer);
+void LoadMemFromBuffer(std::vector<u8>& buffer);
 
 void LoadLastSaved(int i = 1);
 void SaveFirstSaved();

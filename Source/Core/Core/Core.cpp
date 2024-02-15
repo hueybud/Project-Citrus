@@ -333,7 +333,7 @@ void OnFrameEnd()
       if (!StateAuxillary::getCustomTrainingModeStart() && customTrainingCurrentWait > 130)
       {
         StateAuxillary::setCustomTrainingModeStart(true);
-        StateAuxillary::saveStateToTrainingBuffer();
+        StateAuxillary::saveStateToTrainingBuffer2();
         // size is in bytes. so for every word we want, we need 4 bytes (32-bit)
         //Memory::CopyFromEmu(trainingBufer.get(), 0x8160A9C0, 9694);
         return;
@@ -343,7 +343,7 @@ void OnFrameEnd()
         // reset possession change flag
         Memory::Write_U8(0, Metadata::addressCustomTrainingModePossessionChange);
         //Memory::CopyToEmu(0x8160A9C0, trainingBufer.get(), 9694);
-        StateAuxillary::loadStateFromTrainingBuffer();
+        StateAuxillary::loadStateFromTrainingBuffer2();
       }
       return;
     }
@@ -362,12 +362,85 @@ void OnFrameEnd()
       StateAuxillary::setBoolMatchEnd(false);
       boolMatchEnd = false;
 
+      // hockey mode init (do not make a replay)
+      if (Memory::Read_U8(Metadata::addressHockeyModeEnabled))
+      {
+        StateAuxillary::hockeyModeInit();
+        return;
+      }
+
       if (Config::Get(Config::MAIN_REPLAYS))
       {
         // begin recording
         StateAuxillary::startRecording();
       }
     }
+
+    // hockey mode
+    if (Memory::Read_U8(Metadata::addressHockeyModeEnabled))
+    {
+      if (Memory::Read_U8(Metadata::addressHockeyModePenaltyFlag) == 2)
+      {
+        Memory::Write_U8(0, Metadata::addressHockeyModePenaltyFlag);
+        u32 attackingCharacterPointer = Memory::Read_U32(Metadata::addressHockeyModeAttackCharacterId);
+        for (auto& p : StateAuxillary::getHockeyLeftTeamCharacterInfo())
+        {
+          if (p.first == attackingCharacterPointer)
+          {
+            StateAuxillary::HockeyCharacterInfo &characterInfo =
+                StateAuxillary::getHockeyLeftTeamCharacterInfo().at(attackingCharacterPointer);
+            characterInfo.currentlyPenalized = true;
+            StateAuxillary::setHockeyLeftTeamCharacterInfo(attackingCharacterPointer, characterInfo);
+            bool tempBool = StateAuxillary::getHockeyLeftTeamCharacterInfo()
+                                .at(attackingCharacterPointer)
+                                .currentlyPenalized;
+            INFO_LOG_FMT(CORE, "Updated Left Character Info is: {}", tempBool);
+            StateAuxillary::setHockeyLeftTeamTotalPenalties(StateAuxillary::getHockeyLeftTeamTotalPenalties() + 1);
+          }
+        }
+        for (auto& p : StateAuxillary::getHockeyRightTeamCharacterInfo())
+        {
+          if (p.first == attackingCharacterPointer)
+          {
+            StateAuxillary::HockeyCharacterInfo& characterInfo =
+                StateAuxillary::getHockeyRightTeamCharacterInfo().at(attackingCharacterPointer);
+            characterInfo.currentlyPenalized = true;
+            StateAuxillary::setHockeyRightTeamCharacterInfo(attackingCharacterPointer,
+                                                           characterInfo);
+            bool tempBool = StateAuxillary::getHockeyRightTeamCharacterInfo()
+                                .at(attackingCharacterPointer)
+                                .currentlyPenalized;
+            INFO_LOG_FMT(CORE, "Updated Right Character Info is: {}", tempBool);
+            StateAuxillary::setHockeyRightTeamTotalPenalties(
+                StateAuxillary::getHockeyRightTeamTotalPenalties() + 1);
+          }
+        }
+        //std::map<u32, StateAuxillary::HockeyCharacterInfo>::iterator leftTeamIt = StateAuxillary::getHockeyLeftTeamCharacterInfo().find(attackingCharacterPointer);
+        //if (leftTeamIt == StateAuxillary::getHockeyLeftTeamCharacterInfo().end())
+        //{
+        //  // the attacking character is not part of the left team so it should be part of the right team
+        //  auto rightTeamIt = StateAuxillary::getHockeyRightTeamCharacterInfo().find(attackingCharacterPointer);
+        //  if (rightTeamIt != StateAuxillary::getHockeyRightTeamCharacterInfo().end())
+        //  {
+        //    StateAuxillary::setHockeyRightTeamTotalPenalties(StateAuxillary::getHockeyRightTeamTotalPenalties() + 1);
+        //    // switch flag to on
+        //    rightTeamIt->second.currentlyPenalized = true;
+        //  }
+        //}
+        //else
+        //{
+        //  StateAuxillary::setHockeyLeftTeamTotalPenalties(StateAuxillary::getHockeyLeftTeamTotalPenalties() + 1);
+        //  // switch flag to on
+        //  StateAuxillary::HockeyCharacterInfo characterInfo = leftTeamIt->second;
+        //  characterInfo.currentlyPenalized = true;
+        //}
+      }
+      // call state auxillary hockey display updater
+      StateAuxillary::updateHockeyDisplay();
+    }
+
+
+
     /*
     // generate random numbers and fill spots
     randomNumberVector.clear();
@@ -418,7 +491,7 @@ void OnFrameEnd()
 
       // Report score if netplay is running
       std::string jsonString = Metadata::getJSONString();
-      if (NetPlay::IsNetPlayRunning())
+      if (NetPlay::IsNetPlayRunning() && !Memory::Read_U8(Metadata::addressCustomTrainingModeEnabled))
       {
         CitrusRequest::SendMatchStats(jsonString);
       }

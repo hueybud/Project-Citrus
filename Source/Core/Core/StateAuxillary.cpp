@@ -11,6 +11,7 @@
 #include "Common/FileUtil.h"
 #include "HW/Memmap.h"
 #include "Movie.h"
+#include <VideoCommon/OnScreenDisplay.h>
 
 static bool boolMatchStart = false;
 static bool boolMatchEnd = false;
@@ -19,6 +20,12 @@ static bool overwroteHomeCaptainPosTraining = false;
 static bool customTrainingModeStart = false;
 static std::vector<u8> training_mode_buffer;
 static bool isRanked = false;
+
+static std::map<u32, StateAuxillary::HockeyCharacterInfo> hockeyLeftTeamCharacterInfo;
+static int hockeyLeftTeamTotalPenalties = 0;
+static std::map<u32, StateAuxillary::HockeyCharacterInfo> hockeyRightTeamCharacterInfo;
+static int hockeyRightTeamTotalPenalties = 0;
+static int currentTotalScore = 0;
 
 static NetPlay::PadMappingArray netplayGCMap;
 // even if the player is using multiple netplay ports to play, say 1 and 3, the game only needs the first one to do proper playback
@@ -225,9 +232,19 @@ void StateAuxillary::saveStateToTrainingBuffer()
   State::SaveToBuffer(training_mode_buffer);
 }
 
+void StateAuxillary::saveStateToTrainingBuffer2()
+{
+  State::SaveMemToBuffer(training_mode_buffer);
+}
+
 void StateAuxillary::loadStateFromTrainingBuffer()
 {
   State::LoadFromBuffer(training_mode_buffer);
+}
+
+void StateAuxillary::loadStateFromTrainingBuffer2()
+{
+  State::LoadMemFromBuffer(training_mode_buffer);
 }
 
 void StateAuxillary::startRecording()
@@ -395,4 +412,144 @@ bool StateAuxillary::getIsRanked()
 void StateAuxillary::setIsRanked(bool boolValue)
 {
   isRanked = boolValue;
+}
+
+void StateAuxillary::hockeyModeInit()
+{
+  currentTotalScore = 0;
+  // reset gecko flags
+  Memory::Write_U32(0x00000000, Metadata::addressHockeyModeAttackCharacterId);
+  Memory::Write_U8(0, Metadata::addressHockeyModePenaltyFlag);
+  // reset and init team vectors
+  hockeyLeftTeamTotalPenalties = 0;
+  hockeyLeftTeamCharacterInfo.clear();
+  // 15, 16, 17, 18 are y
+  // -.4 and .4 are X
+  std::vector<u32> leftPenaltyXAddresses = {0xC0800000, 0xC0400000, 0xC0000000, 0xBF800000};
+  std::vector<u32> rightPenaltyXAddresses = {0x40800000, 0x40400000, 0x40000000, 0x3F800000};
+  std::vector<u32> penaltyYAddresses = {0x41A00000, 0x41A80000, 0x41B00000, 0x41B80000};
+  for (int i = 0; i < 4; i++)
+  {
+    u32 characterPointer = Memory::Read_U32(Metadata::addressCharacterPointersBase + (i * 4));
+    HockeyCharacterInfo characterInfo = {0, 20, leftPenaltyXAddresses.at(i), penaltyYAddresses.at(0)};
+    hockeyLeftTeamCharacterInfo.emplace(characterPointer, characterInfo);
+  }
+  hockeyRightTeamTotalPenalties = 0;
+  hockeyRightTeamCharacterInfo.clear();
+  for (int i = 0; i < 4; i++)
+  {
+    u32 characterPointer = Memory::Read_U32(Metadata::addressCharacterPointersBase + 16 + (i * 4));
+    HockeyCharacterInfo characterInfo = {0, 20, rightPenaltyXAddresses.at(i), penaltyYAddresses.at(0)};
+    hockeyRightTeamCharacterInfo.emplace(characterPointer, characterInfo);
+  }
+}
+
+std::map<u32, StateAuxillary::HockeyCharacterInfo> StateAuxillary::getHockeyLeftTeamCharacterInfo()
+{
+  return hockeyLeftTeamCharacterInfo;
+}
+
+std::map<u32, StateAuxillary::HockeyCharacterInfo> StateAuxillary::getHockeyRightTeamCharacterInfo()
+{
+  return hockeyRightTeamCharacterInfo;
+}
+
+void StateAuxillary::setHockeyLeftTeamCharacterInfo(u32 characterPointer, HockeyCharacterInfo characterInfo)
+{
+  hockeyLeftTeamCharacterInfo[characterPointer] = characterInfo;
+}
+
+void StateAuxillary::setHockeyRightTeamCharacterInfo(u32 characterPointer, HockeyCharacterInfo characterInfo)
+{
+  hockeyRightTeamCharacterInfo[characterPointer] = characterInfo;
+}
+
+int StateAuxillary::getHockeyLeftTeamTotalPenalties()
+{
+  return hockeyLeftTeamTotalPenalties;
+}
+
+int StateAuxillary::getHockeyRightTeamTotalPenalties()
+{
+  return hockeyRightTeamTotalPenalties;
+}
+
+void StateAuxillary::setHockeyLeftTeamTotalPenalties(int hitParam)
+{
+  hockeyLeftTeamTotalPenalties = hitParam;
+}
+
+void StateAuxillary::setHockeyRightTeamTotalPenalties(int hitParam)
+{
+  hockeyRightTeamTotalPenalties = hitParam;
+}
+
+void StateAuxillary::updateHockeyDisplay()
+{
+  u16 totalScore = Memory::Read_U16(Metadata::addressLeftSideScore) +
+                   Memory::Read_U16(Metadata::addressRightSideScore);
+  if (totalScore != currentTotalScore)
+  {
+    // reset all positions
+    hockeyModeInit();
+    currentTotalScore = totalScore;
+    return;
+  }
+  int i = 0;
+  if (hockeyLeftTeamTotalPenalties >= 1)
+  {
+    for (auto& p : StateAuxillary::getHockeyLeftTeamCharacterInfo())
+    {
+      if (p.second.currentlyPenalized)
+      {
+        if (p.second.currentlyPenalizedTimeRemaining > 0)
+        {
+          Memory::Write_U32(p.second.penaltyXAddress, p.first + 0x520);
+          Memory::Write_U32(p.second.penaltyYAddress, p.first + 0x524);
+          float remainingTime = p.second.currentlyPenalizedTimeRemaining - (float(1) / float(60));
+          setHockeyLeftTeamCharacterInfo(p.first, {p.second.currentlyPenalized, remainingTime});
+          OSD::AddTypedMessage(OSD::MessageType(3 + i),
+                               fmt::format("Left Team Player {} Penalty Time Remaining: {} seconds",
+                                           i + 1, std::round(remainingTime)),
+                               OSD::Duration::SHORT, OSD::Color::CYAN);
+        }
+        else
+        {
+          setHockeyLeftTeamCharacterInfo(p.first, {false, 20});
+          Memory::Write_U32(0, p.first + 0x520);
+          Memory::Write_U32(0, p.first + 0x524);
+        }
+      }
+      i++;
+    }
+    
+  }
+  i = 0;
+  if (hockeyRightTeamTotalPenalties >= 1)
+  {
+    for (auto& p : StateAuxillary::getHockeyRightTeamCharacterInfo())
+    {
+      if (p.second.currentlyPenalized)
+      {
+        if (p.second.currentlyPenalizedTimeRemaining > 0)
+        {
+          Memory::Write_U32(p.second.penaltyXAddress, p.first + 0x520);
+          Memory::Write_U32(p.second.penaltyYAddress, p.first + 0x524);
+          float remainingTime = p.second.currentlyPenalizedTimeRemaining - (float(1) / float(60));
+          setHockeyRightTeamCharacterInfo(p.first, {p.second.currentlyPenalized, remainingTime});
+          OSD::AddTypedMessage(OSD::MessageType(6 + i),
+                               fmt::format("Right Team Player {} Penalty Time Remaining: {} seconds", i + 1,
+                                std::round(remainingTime)),
+                               OSD::Duration::SHORT, OSD::Color::YELLOW);
+        }
+        else
+        {
+          setHockeyRightTeamCharacterInfo(p.first, {false, 20});
+          Memory::Write_U32(0, p.first + 0x520);
+          Memory::Write_U32(0, p.first + 0x524);
+        }
+      }
+      i++;
+    }
+  }
 }
