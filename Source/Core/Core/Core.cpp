@@ -312,7 +312,7 @@ void OnFrameEnd()
   if (Memory::Read_U8(Metadata::addressMatchStart) == 1)
   {
     // training mode
-    if (Memory::Read_U8(Metadata::addressCustomTrainingModeEnabled) && Metadata::getMatchMode() == 1 && !NetPlay::IsNetPlayRunning())
+    if (Memory::Read_U8(Metadata::addressCustomTrainingModeEnabled) == 1 && Metadata::getMatchMode() == 1 && !NetPlay::IsNetPlayRunning() && !Movie::IsPlayingInput())
     {
 
       if (!StateAuxillary::getOverwriteHomeCaptainPositionTrainingMode())
