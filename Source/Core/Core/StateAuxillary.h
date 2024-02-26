@@ -12,8 +12,8 @@ public:
   {
     bool currentlyPenalized;
     float currentlyPenalizedTimeRemaining;
-    u32 penaltyXAddress;
-    u32 penaltyYAddress;
+    float penaltyXAddress;
+    float penaltyYAddress;
   };
   static void saveState(const std::string& filename, bool wait = false);
   static void saveStateToTrainingBuffer();
@@ -48,6 +48,7 @@ public:
   static void setOverwriteHomeCaptainPositionTrainingMode(bool boolValue);
   static void setCustomTrainingModeStart(bool boolValue);
   static void setIsRanked(bool boolValue);
+  static int getMinPowerPlayPenaltyAmount();
   static void setHockeyLeftTeamCharacterInfo(u32 characterPointer, HockeyCharacterInfo characterInfo);
   static void setHockeyRightTeamCharacterInfo(u32 characterPointer, HockeyCharacterInfo characterInfo);
   static void hockeyModeInit();

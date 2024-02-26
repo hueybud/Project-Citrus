@@ -21,6 +21,8 @@ enum class MessageType
   HockeyRightTeam1,
   HockeyRightTeam2,
   HockeyRightTeam3,
+  HockeyLeftTeamTotalPenalties,
+  HockeyRightTeamTotalPenalties,
   // This entry must be kept last so that persistent typed messages are
   // displayed before other messages
   Typeless,

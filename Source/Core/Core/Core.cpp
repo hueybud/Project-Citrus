@@ -365,6 +365,8 @@ void OnFrameEnd()
       // hockey mode init (do not make a replay)
       if (Memory::Read_U8(Metadata::addressHockeyModeEnabled))
       {
+        StateAuxillary::setHockeyLeftTeamTotalPenalties(0);
+        StateAuxillary::setHockeyRightTeamTotalPenalties(0);
         StateAuxillary::hockeyModeInit();
         return;
       }
@@ -387,53 +389,46 @@ void OnFrameEnd()
         {
           if (p.first == attackingCharacterPointer)
           {
-            StateAuxillary::HockeyCharacterInfo &characterInfo =
-                StateAuxillary::getHockeyLeftTeamCharacterInfo().at(attackingCharacterPointer);
-            characterInfo.currentlyPenalized = true;
-            StateAuxillary::setHockeyLeftTeamCharacterInfo(attackingCharacterPointer, characterInfo);
-            bool tempBool = StateAuxillary::getHockeyLeftTeamCharacterInfo()
-                                .at(attackingCharacterPointer)
-                                .currentlyPenalized;
-            INFO_LOG_FMT(CORE, "Updated Left Character Info is: {}", tempBool);
-            StateAuxillary::setHockeyLeftTeamTotalPenalties(StateAuxillary::getHockeyLeftTeamTotalPenalties() + 1);
+            StateAuxillary::setHockeyLeftTeamTotalPenalties(
+                StateAuxillary::getHockeyLeftTeamTotalPenalties() + 1);
+            // do check to see if we are at min number to consider the player penalized
+            if (StateAuxillary::getHockeyLeftTeamTotalPenalties() >=
+                StateAuxillary::getMinPowerPlayPenaltyAmount())
+            {
+              StateAuxillary::HockeyCharacterInfo& characterInfo =
+                  StateAuxillary::getHockeyLeftTeamCharacterInfo().at(attackingCharacterPointer);
+              characterInfo.currentlyPenalized = true;
+              StateAuxillary::setHockeyLeftTeamCharacterInfo(attackingCharacterPointer,
+                                                             characterInfo);
+              bool tempBool = StateAuxillary::getHockeyLeftTeamCharacterInfo()
+                                  .at(attackingCharacterPointer)
+                                  .currentlyPenalized;
+              INFO_LOG_FMT(CORE, "Updated Left Character Info is: {}", tempBool);
+            }
           }
         }
         for (auto& p : StateAuxillary::getHockeyRightTeamCharacterInfo())
         {
           if (p.first == attackingCharacterPointer)
           {
-            StateAuxillary::HockeyCharacterInfo& characterInfo =
-                StateAuxillary::getHockeyRightTeamCharacterInfo().at(attackingCharacterPointer);
-            characterInfo.currentlyPenalized = true;
-            StateAuxillary::setHockeyRightTeamCharacterInfo(attackingCharacterPointer,
-                                                           characterInfo);
-            bool tempBool = StateAuxillary::getHockeyRightTeamCharacterInfo()
-                                .at(attackingCharacterPointer)
-                                .currentlyPenalized;
-            INFO_LOG_FMT(CORE, "Updated Right Character Info is: {}", tempBool);
             StateAuxillary::setHockeyRightTeamTotalPenalties(
                 StateAuxillary::getHockeyRightTeamTotalPenalties() + 1);
+            // do check to see if we are at min number to consider the player penalized
+            if (StateAuxillary::getHockeyRightTeamTotalPenalties() >=
+                StateAuxillary::getMinPowerPlayPenaltyAmount())
+            {
+              StateAuxillary::HockeyCharacterInfo& characterInfo =
+                  StateAuxillary::getHockeyRightTeamCharacterInfo().at(attackingCharacterPointer);
+              characterInfo.currentlyPenalized = true;
+              StateAuxillary::setHockeyRightTeamCharacterInfo(attackingCharacterPointer,
+                                                              characterInfo);
+              bool tempBool = StateAuxillary::getHockeyRightTeamCharacterInfo()
+                                  .at(attackingCharacterPointer)
+                                  .currentlyPenalized;
+              INFO_LOG_FMT(CORE, "Updated Right Character Info is: {}", tempBool);
+            }
           }
         }
-        //std::map<u32, StateAuxillary::HockeyCharacterInfo>::iterator leftTeamIt = StateAuxillary::getHockeyLeftTeamCharacterInfo().find(attackingCharacterPointer);
-        //if (leftTeamIt == StateAuxillary::getHockeyLeftTeamCharacterInfo().end())
-        //{
-        //  // the attacking character is not part of the left team so it should be part of the right team
-        //  auto rightTeamIt = StateAuxillary::getHockeyRightTeamCharacterInfo().find(attackingCharacterPointer);
-        //  if (rightTeamIt != StateAuxillary::getHockeyRightTeamCharacterInfo().end())
-        //  {
-        //    StateAuxillary::setHockeyRightTeamTotalPenalties(StateAuxillary::getHockeyRightTeamTotalPenalties() + 1);
-        //    // switch flag to on
-        //    rightTeamIt->second.currentlyPenalized = true;
-        //  }
-        //}
-        //else
-        //{
-        //  StateAuxillary::setHockeyLeftTeamTotalPenalties(StateAuxillary::getHockeyLeftTeamTotalPenalties() + 1);
-        //  // switch flag to on
-        //  StateAuxillary::HockeyCharacterInfo characterInfo = leftTeamIt->second;
-        //  characterInfo.currentlyPenalized = true;
-        //}
       }
       // call state auxillary hockey display updater
       StateAuxillary::updateHockeyDisplay();
