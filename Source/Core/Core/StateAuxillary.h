@@ -14,6 +14,7 @@ public:
     float currentlyPenalizedTimeRemaining;
     float penaltyXAddress;
     float penaltyYAddress;
+    u32 characterPointer;
   };
   static void saveState(const std::string& filename, bool wait = false);
   static void saveStateToTrainingBuffer();
@@ -41,6 +42,9 @@ public:
   static std::map<u32, HockeyCharacterInfo> getHockeyRightTeamCharacterInfo();
   static int getHockeyLeftTeamTotalPenalties();
   static int getHockeyRightTeamTotalPenalties();
+  static std::vector<HockeyCharacterInfo> getHockeyLeftTeamPenaltyCharacters();
+  static std::vector<HockeyCharacterInfo> getHockeyRightTeamPenaltyCharacters();
+  static int getMinPowerPlayPenaltyAmount();
   static void setBoolMatchStart(bool boolValue);
   static void setBoolMatchEnd(bool boolValue);
   static void setBoolWroteCodes(bool boolValue);
@@ -48,9 +52,10 @@ public:
   static void setOverwriteHomeCaptainPositionTrainingMode(bool boolValue);
   static void setCustomTrainingModeStart(bool boolValue);
   static void setIsRanked(bool boolValue);
-  static int getMinPowerPlayPenaltyAmount();
   static void setHockeyLeftTeamCharacterInfo(u32 characterPointer, HockeyCharacterInfo characterInfo);
   static void setHockeyRightTeamCharacterInfo(u32 characterPointer, HockeyCharacterInfo characterInfo);
+  static void pushHockeyLeftTeamPenaltyCharacter(HockeyCharacterInfo characterInfo);
+  static void pushHockeyRightTeamPenaltyCharacter(HockeyCharacterInfo characterInfo);
   static void hockeyModeInit();
   static void setHockeyLeftTeamTotalPenalties(int hitParam);
   static void setHockeyRightTeamTotalPenalties(int hitParam);

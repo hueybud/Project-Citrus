@@ -58,6 +58,7 @@ public:
   static const u32 addressRightSideSidekickID = 0x815369fc;
   static const u32 addressStadiumID = 0x81536a00;
   static const u32 addressCharacterPointersBase = 0x8030d510;
+  static const u32 addressIsGamePaused = 0x803725c1; // 1 if the pause screen is active, 0 all other parts of an active game 
 
   static const u32 addressLeftSideCupCaptainID = 0x8040000c;
   static const u32 addressLeftSideCupSidekickID = 0x8040000d;

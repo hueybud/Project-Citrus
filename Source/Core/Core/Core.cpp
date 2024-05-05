@@ -392,9 +392,18 @@ void OnFrameEnd()
             StateAuxillary::setHockeyLeftTeamTotalPenalties(
                 StateAuxillary::getHockeyLeftTeamTotalPenalties() + 1);
             // do check to see if we are at min number to consider the player penalized
+            // and do not have three players currently penalized (we can't put all 4 in)
             if (StateAuxillary::getHockeyLeftTeamTotalPenalties() >=
-                StateAuxillary::getMinPowerPlayPenaltyAmount())
+                    StateAuxillary::getMinPowerPlayPenaltyAmount() &&
+                StateAuxillary::getHockeyLeftTeamPenaltyCharacters().size() < 3)
             {
+              StateAuxillary::HockeyCharacterInfo& characterInfo =
+                  StateAuxillary::getHockeyLeftTeamCharacterInfo().at(attackingCharacterPointer);
+              characterInfo.currentlyPenalized = true;
+              characterInfo.characterPointer = attackingCharacterPointer;
+              // insert into queue here
+              StateAuxillary::pushHockeyLeftTeamPenaltyCharacter(characterInfo);
+              /*
               StateAuxillary::HockeyCharacterInfo& characterInfo =
                   StateAuxillary::getHockeyLeftTeamCharacterInfo().at(attackingCharacterPointer);
               characterInfo.currentlyPenalized = true;
@@ -404,6 +413,7 @@ void OnFrameEnd()
                                   .at(attackingCharacterPointer)
                                   .currentlyPenalized;
               INFO_LOG_FMT(CORE, "Updated Left Character Info is: {}", tempBool);
+              */
             }
           }
         }
@@ -414,18 +424,28 @@ void OnFrameEnd()
             StateAuxillary::setHockeyRightTeamTotalPenalties(
                 StateAuxillary::getHockeyRightTeamTotalPenalties() + 1);
             // do check to see if we are at min number to consider the player penalized
+            // and do not have three players currently penalized (we can't put all 4 in)
             if (StateAuxillary::getHockeyRightTeamTotalPenalties() >=
-                StateAuxillary::getMinPowerPlayPenaltyAmount())
+                    StateAuxillary::getMinPowerPlayPenaltyAmount() &&
+                StateAuxillary::getHockeyRightTeamPenaltyCharacters().size() < 3)
             {
+              // let's consider an approach where we push the character into the penalty queue
+              // in stateauxillary, we can instead iterate over the penalty queue and remove the char when all is said and done
+              // because queue is fifo, stateauxillary logic should determine where to place the char by amount of iterations into queue
               StateAuxillary::HockeyCharacterInfo& characterInfo =
                   StateAuxillary::getHockeyRightTeamCharacterInfo().at(attackingCharacterPointer);
               characterInfo.currentlyPenalized = true;
+              characterInfo.characterPointer = attackingCharacterPointer;
+              // insert into queue here
+              StateAuxillary::pushHockeyRightTeamPenaltyCharacter(characterInfo);
+              /*
               StateAuxillary::setHockeyRightTeamCharacterInfo(attackingCharacterPointer,
                                                               characterInfo);
               bool tempBool = StateAuxillary::getHockeyRightTeamCharacterInfo()
                                   .at(attackingCharacterPointer)
                                   .currentlyPenalized;
               INFO_LOG_FMT(CORE, "Updated Right Character Info is: {}", tempBool);
+              */
             }
           }
         }

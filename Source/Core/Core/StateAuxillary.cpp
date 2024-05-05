@@ -12,6 +12,7 @@
 #include "HW/Memmap.h"
 #include "Movie.h"
 #include <VideoCommon/OnScreenDisplay.h>
+#include <queue>
 
 static bool boolMatchStart = false;
 static bool boolMatchEnd = false;
@@ -24,10 +25,16 @@ static bool isRanked = false;
 // the amount of penalties that can be incurred before we start placing players in a power play
 static int minPowerPlayPenaltyAmount = 1;
 static std::map<u32, StateAuxillary::HockeyCharacterInfo> hockeyLeftTeamCharacterInfo;
+static std::vector<StateAuxillary::HockeyCharacterInfo> hockeyLeftTeamActivePenalty;
 static int hockeyLeftTeamTotalPenalties = 0;
 static std::map<u32, StateAuxillary::HockeyCharacterInfo> hockeyRightTeamCharacterInfo;
+static std::vector<StateAuxillary::HockeyCharacterInfo> hockeyRightTeamActivePenalty;
 static int hockeyRightTeamTotalPenalties = 0;
 static int currentTotalScore = 0;
+// vertical tunnel stack
+std::vector<float> leftPenaltyXAddresses = {-1, -1, -1, -1};
+std::vector<float> rightPenaltyXAddresses = {.5, .5, .5, .5};
+std::vector<float> penaltyYAddresses = {15, 17, 19, 20};
 
 static NetPlay::PadMappingArray netplayGCMap;
 // even if the player is using multiple netplay ports to play, say 1 and 3, the game only needs the first one to do proper playback
@@ -428,6 +435,8 @@ void StateAuxillary::hockeyModeInit()
   Memory::Write_U32(0x00000000, Metadata::addressHockeyModeAttackCharacterId);
   Memory::Write_U8(0, Metadata::addressHockeyModePenaltyFlag);
   // reset and init team vectors
+  hockeyLeftTeamActivePenalty.clear();
+  hockeyRightTeamActivePenalty.clear();
   hockeyLeftTeamCharacterInfo.clear();
   /* good ones for horizontal tunnel. would be better if we stacked them vertical tho
   std::vector<float> leftPenaltyXAddresses = {-1, -.5, .5, 1};
@@ -440,11 +449,7 @@ void StateAuxillary::hockeyModeInit()
   std::vector<float> rightPenaltyXAddresses = {23, 23, 23, 23};
   std::vector<float> penaltyYAddresses = {-.75, -.25, .25, .75};
   */
-  // vertical tunnel stack
-  
-  std::vector<float> leftPenaltyXAddresses = {-1, -1, -1, -1};
-  std::vector<float> rightPenaltyXAddresses = {.5, .5, .5, .5};
-  std::vector<float> penaltyYAddresses = {15, 17, 19, 20};
+
   
   // bench stack
   /*
@@ -487,6 +492,26 @@ void StateAuxillary::setHockeyRightTeamCharacterInfo(u32 characterPointer, Hocke
   hockeyRightTeamCharacterInfo[characterPointer] = characterInfo;
 }
 
+std::vector<StateAuxillary::HockeyCharacterInfo> StateAuxillary::getHockeyLeftTeamPenaltyCharacters()
+{
+  return hockeyLeftTeamActivePenalty;
+}
+
+std::vector<StateAuxillary::HockeyCharacterInfo> StateAuxillary::getHockeyRightTeamPenaltyCharacters()
+{
+  return hockeyRightTeamActivePenalty;
+}
+
+void StateAuxillary::pushHockeyLeftTeamPenaltyCharacter(HockeyCharacterInfo characterInfo)
+{
+  hockeyLeftTeamActivePenalty.push_back(characterInfo);
+}
+
+void StateAuxillary::pushHockeyRightTeamPenaltyCharacter(HockeyCharacterInfo characterInfo)
+{
+  hockeyRightTeamActivePenalty.push_back(characterInfo);
+}
+
 int StateAuxillary::getHockeyLeftTeamTotalPenalties()
 {
   return hockeyLeftTeamTotalPenalties;
@@ -514,9 +539,9 @@ void StateAuxillary::updateHockeyDisplay()
   if (totalScore != currentTotalScore)
   {
     // reset all positions
-    hockeyModeInit();
+    hockeyLeftTeamActivePenalty.clear();
+    hockeyRightTeamActivePenalty.clear();
     currentTotalScore = totalScore;
-    return;
   }
   std::string leftTeamDisplayString =
       fmt::format("Left Team Total Penalties: {}\n", hockeyLeftTeamTotalPenalties);
@@ -530,87 +555,153 @@ void StateAuxillary::updateHockeyDisplay()
                        fmt::format("Right Team Total Penalties: {}", hockeyRightTeamTotalPenalties),
                        OSD::Duration::SHORT, OSD::Color::YELLOW);
   */
-  int i = 0;
-  int j = 1;
+  int j = 0;
   if (hockeyLeftTeamTotalPenalties >= 1)
   {
-    for (auto& p : StateAuxillary::getHockeyLeftTeamCharacterInfo())
+    std::vector<StateAuxillary::HockeyCharacterInfo>::iterator iter;
+    for (iter = hockeyLeftTeamActivePenalty.begin(); iter != hockeyLeftTeamActivePenalty.end();)
     {
-      // we should add a condition that the game is not paused
-      if (p.second.currentlyPenalized)
+      // Check if this player's remaining penalty time needs to be reset or decremented
+      if (iter->currentlyPenalizedTimeRemaining > 0)
       {
-        if (p.second.currentlyPenalizedTimeRemaining > 0)
-        {
-          PowerPC::HostWrite_F32(p.second.penaltyXAddress, p.first + 0x520);
-          PowerPC::HostWrite_F32(p.second.penaltyYAddress, p.first + 0x524);
-          INFO_LOG_FMT(CORE, "Player {} should have been sentenced to {}, {}", p.first,
-                       p.second.penaltyXAddress, p.second.penaltyYAddress);
-          INFO_LOG_FMT(CORE, "Player {} was sentenced to {}, {}", p.first,
-                       Memory::Read_U32(p.first + 0x520), Memory::Read_U32(p.first + 0x524));
-          float remainingTime = p.second.currentlyPenalizedTimeRemaining - (float(1) / float(60));
-          setHockeyLeftTeamCharacterInfo(p.first, {p.second.currentlyPenalized, remainingTime, p.second.penaltyXAddress, p.second.penaltyYAddress});
-          std::string playerDisplayString = fmt::format(
-              "\nPlayer {} Penalty Time Remaining: {} seconds", j + 1, std::round(remainingTime));
-          leftTeamDisplayString += playerDisplayString;
-          j++;
-          /*
-          OSD::AddTypedMessage(OSD::MessageType(3 + i),
-                               fmt::format("Left Team Player {} Penalty Time Remaining: {} seconds",
-                                           i + 1, std::round(remainingTime)),
-                               OSD::Duration::SHORT, OSD::Color::CYAN);
-          */
-        }
-        else
-        {
-          setHockeyLeftTeamCharacterInfo(p.first, {false, 20, p.second.penaltyXAddress, p.second.penaltyYAddress});
-          PowerPC::HostWrite_F32(0, p.first + 0x520);
-          PowerPC::HostWrite_F32(0, p.first + 0x524);
-        }
+        float penaltyXAddress = leftPenaltyXAddresses.at(j);
+        float penaltyYAddress = penaltyYAddresses.at(j);
+        PowerPC::HostWrite_F32(penaltyXAddress, iter->characterPointer + 0x520);
+        PowerPC::HostWrite_F32(penaltyYAddress, iter->characterPointer + 0x524);
+        /*
+        INFO_LOG_FMT(CORE, "Player {} should have been sentenced to {}, {}", p.first,
+                     p.second.penaltyXAddress, p.second.penaltyYAddress);
+        INFO_LOG_FMT(CORE, "Player {} was sentenced to {}, {}", p.first,
+                     Memory::Read_U32(p.first + 0x520), Memory::Read_U32(p.first + 0x524));
+                     */
+
+        // Make the decrement time 1/60 seconds (1 frame) if the game is not paused, otherwise, 0
+        float decrementTime =
+            Memory::Read_U8(Metadata::addressIsGamePaused) == 0 ? (float(1) / float(60)) : 0;
+        float remainingTime = iter->currentlyPenalizedTimeRemaining - decrementTime;
+        iter->currentlyPenalizedTimeRemaining = remainingTime;
+        // StateAuxillary::getHockeyRightTeamPenaltyCharacters()[j] = p;
+        INFO_LOG_FMT(CORE, "Updated Left Player with Queue Functionality: {}",
+                     iter->currentlyPenalizedTimeRemaining);
+        /*
+        setHockeyRightTeamCharacterInfo(p.first,
+                                        {p.second.currentlyPenalized, remainingTime,
+                                         p.second.penaltyXAddress, p.second.penaltyYAddress});
+                                         */
+        std::string playerDisplayString =
+            fmt::format("\nPlayer {} Penalty Time Remaining: {} seconds", j + 1,
+                        std::round(iter->currentlyPenalizedTimeRemaining));
+        leftTeamDisplayString += playerDisplayString;
+        iter++;
+        j++;
       }
-      i++;
+      else
+      {
+        PowerPC::HostWrite_F32(0, iter->characterPointer + 0x520);
+        PowerPC::HostWrite_F32(0, iter->characterPointer + 0x524);
+        iter = hockeyLeftTeamActivePenalty.erase(iter);
+        // since this is essentially a queue datastruucture, when we remove a player, we should
+        // restart j at 0 since this would be the first position
+        j = 0;
+      }
     }
-    
   }
-  i = 0;
-  j = 1;
+  j = 0;
   if (hockeyRightTeamTotalPenalties >= 1)
   {
-    for (auto& p : StateAuxillary::getHockeyRightTeamCharacterInfo())
+    std::vector<StateAuxillary::HockeyCharacterInfo>::iterator iter;
+    for (iter = hockeyRightTeamActivePenalty.begin(); iter != hockeyRightTeamActivePenalty.end();)
     {
-      if (p.second.currentlyPenalized)
+      // Check if this player's remaining penalty time needs to be reset or decremented
+      if (iter->currentlyPenalizedTimeRemaining > 0)
       {
-        if (p.second.currentlyPenalizedTimeRemaining > 0)
-        {
-          PowerPC::HostWrite_F32(p.second.penaltyXAddress, p.first + 0x520);
-          PowerPC::HostWrite_F32(p.second.penaltyYAddress, p.first + 0x524);
-          INFO_LOG_FMT(CORE, "Player {} should have been sentenced to {}, {}", p.first,
-                       p.second.penaltyXAddress, p.second.penaltyYAddress);
-          INFO_LOG_FMT(CORE, "Player {} was sentenced to {}, {}", p.first,
-                       Memory::Read_U32(p.first + 0x520), Memory::Read_U32(p.first + 0x524));
-          float remainingTime = p.second.currentlyPenalizedTimeRemaining - (float(1) / float(60));
-          setHockeyRightTeamCharacterInfo(p.first,
-                                          {p.second.currentlyPenalized, remainingTime,
-                                           p.second.penaltyXAddress, p.second.penaltyYAddress});
-          std::string playerDisplayString = fmt::format(
-              "\nPlayer {} Penalty Time Remaining: {} seconds", j + 1, std::round(remainingTime));
-          rightTeamDisplayString += playerDisplayString;
-          j++;
-          /*
-          OSD::AddTypedMessage(OSD::MessageType(6 + i),
-                               fmt::format("Right Team Player {} Penalty Time Remaining: {} seconds", i + 1,
-                                std::round(remainingTime)),
-                               OSD::Duration::SHORT, OSD::Color::YELLOW);
-          */
-        }
-        else
-        {
-          setHockeyRightTeamCharacterInfo(p.first, {false, 20, p.second.penaltyXAddress, p.second.penaltyYAddress});
-          PowerPC::HostWrite_F32(0, p.first + 0x520);
-          PowerPC::HostWrite_F32(0, p.first + 0x524);
-        }
+        float penaltyXAddress = rightPenaltyXAddresses.at(j);
+        float penaltyYAddress = penaltyYAddresses.at(j);
+        PowerPC::HostWrite_F32(penaltyXAddress, iter->characterPointer + 0x520);
+        PowerPC::HostWrite_F32(penaltyYAddress, iter->characterPointer + 0x524);
+        /*
+        INFO_LOG_FMT(CORE, "Player {} should have been sentenced to {}, {}", p.first,
+                     p.second.penaltyXAddress, p.second.penaltyYAddress);
+        INFO_LOG_FMT(CORE, "Player {} was sentenced to {}, {}", p.first,
+                     Memory::Read_U32(p.first + 0x520), Memory::Read_U32(p.first + 0x524));
+                     */
+
+        // Make the decrement time 1/60 seconds (1 frame) if the game is not paused, otherwise, 0
+        float decrementTime =
+            Memory::Read_U8(Metadata::addressIsGamePaused) == 0 ? (float(1) / float(60)) : 0;
+        float remainingTime = iter->currentlyPenalizedTimeRemaining - decrementTime;
+        iter->currentlyPenalizedTimeRemaining = remainingTime;
+        //StateAuxillary::getHockeyRightTeamPenaltyCharacters()[j] = p;
+        INFO_LOG_FMT(CORE, "Updated Right Player with Queue Functionality: {}",
+                     iter->currentlyPenalizedTimeRemaining);
+        /*
+        setHockeyRightTeamCharacterInfo(p.first,
+                                        {p.second.currentlyPenalized, remainingTime,
+                                         p.second.penaltyXAddress, p.second.penaltyYAddress});
+                                         */
+        std::string playerDisplayString =
+            fmt::format("\nPlayer {} Penalty Time Remaining: {} seconds", j + 1,
+                        std::round(iter->currentlyPenalizedTimeRemaining));
+        rightTeamDisplayString += playerDisplayString;
+        iter++;
+        j++;
       }
-      i++;
+      else
+      {
+        PowerPC::HostWrite_F32(0, iter->characterPointer + 0x520);
+        PowerPC::HostWrite_F32(0, iter->characterPointer + 0x524);
+        iter = hockeyRightTeamActivePenalty.erase(iter);
+        // since this is essentially a queue datastruucture, when we remove a player, we should restart j at 0 since this would be the first position
+        j = 0;
+      }
     }
+
+    //for (auto& p : StateAuxillary::getHockeyRightTeamPenaltyCharacters())
+    //{
+    //  if (p.currentlyPenalizedTimeRemaining > 0)
+    //  {
+    //    float penaltyXAddress = rightPenaltyXAddresses.at(j);
+    //    float penaltyYAddress = penaltyYAddresses.at(j);
+    //    PowerPC::HostWrite_F32(penaltyXAddress, p.characterPointer + 0x520);
+    //    PowerPC::HostWrite_F32(penaltyYAddress, p.characterPointer + 0x524);
+    //    /*
+    //    INFO_LOG_FMT(CORE, "Player {} should have been sentenced to {}, {}", p.first,
+    //                 p.second.penaltyXAddress, p.second.penaltyYAddress);
+    //    INFO_LOG_FMT(CORE, "Player {} was sentenced to {}, {}", p.first,
+    //                 Memory::Read_U32(p.first + 0x520), Memory::Read_U32(p.first + 0x524));
+    //                 */
+    //    float remainingTime =
+    //        p.currentlyPenalizedTimeRemaining - (float(1) / float(60));
+    //    p.currentlyPenalizedTimeRemaining = remainingTime;
+    //    StateAuxillary::getHockeyRightTeamPenaltyCharacters()[j] = p;
+    //    INFO_LOG_FMT(CORE, "Updated Right Player with Queue Functionality: {}", p.currentlyPenalizedTimeRemaining);
+    //    /*
+    //    setHockeyRightTeamCharacterInfo(p.first,
+    //                                    {p.second.currentlyPenalized, remainingTime,
+    //                                     p.second.penaltyXAddress, p.second.penaltyYAddress});
+    //                                     */
+    //    std::string playerDisplayString =
+    //        fmt::format("\nPlayer {} Penalty Time Remaining: {} seconds", j + 1,
+    //                    std::round(p.currentlyPenalizedTimeRemaining));
+    //    rightTeamDisplayString += playerDisplayString;
+    //    /*
+    //    OSD::AddTypedMessage(OSD::MessageType(6 + i),
+    //                         fmt::format("Right Team Player {} Penalty Time Remaining: {} seconds",
+    //    i + 1, std::round(remainingTime)), OSD::Duration::SHORT, OSD::Color::YELLOW);
+    //    */
+    //  }
+    //  else
+    //  {
+    //    // setHockeyRightTeamCharacterInfo(p.first, {false, 20, p.second.penaltyXAddress,
+    //    // p.second.penaltyYAddress});
+    //    PowerPC::HostWrite_F32(0, p.characterPointer + 0x520);
+    //    PowerPC::HostWrite_F32(0, p.characterPointer + 0x524);
+    //    StateAuxillary::getHockeyRightTeamPenaltyCharacters().erase(
+    //        StateAuxillary::getHockeyRightTeamPenaltyCharacters().begin() + j);
+    //    j--;
+    //  }
+    //  j++;
+    //}
   }
   OSD::AddTypedMessage(OSD::MessageType::HockeyLeftTeamTotalPenalties, leftTeamDisplayString,
                        OSD::Duration::SHORT, OSD::Color::CYAN);
