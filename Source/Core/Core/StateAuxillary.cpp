@@ -543,10 +543,6 @@ void StateAuxillary::updateHockeyDisplay()
     hockeyRightTeamActivePenalty.clear();
     currentTotalScore = totalScore;
   }
-  std::string leftTeamDisplayString =
-      fmt::format("Left Team Total Penalties: {}\n", hockeyLeftTeamTotalPenalties);
-  std::string rightTeamDisplayString =
-      fmt::format("Right Team Total Penalties: {}\n", hockeyRightTeamTotalPenalties);
   /*
   OSD::AddTypedMessage(OSD::MessageType::HockeyLeftTeamTotalPenalties,
                        fmt::format("Left Team Total Penalties: {}\nTest new line", hockeyLeftTeamTotalPenalties),
@@ -556,8 +552,12 @@ void StateAuxillary::updateHockeyDisplay()
                        OSD::Duration::SHORT, OSD::Color::YELLOW);
   */
   int j = 0;
-  if (hockeyLeftTeamTotalPenalties >= 1)
+  // switching this to be based on active penalties instead of total
+  // doing this as an effort to immediately induce power plays as opposed to waiting around
+  if (hockeyLeftTeamActivePenalty.size() >= 1)
   {
+    std::string leftTeamDisplayString =
+        fmt::format("Left Team Active Penalties \n", hockeyLeftTeamTotalPenalties);
     std::vector<StateAuxillary::HockeyCharacterInfo>::iterator iter;
     for (iter = hockeyLeftTeamActivePenalty.begin(); iter != hockeyLeftTeamActivePenalty.end();)
     {
@@ -588,9 +588,8 @@ void StateAuxillary::updateHockeyDisplay()
                                         {p.second.currentlyPenalized, remainingTime,
                                          p.second.penaltyXAddress, p.second.penaltyYAddress});
                                          */
-        std::string playerDisplayString =
-            fmt::format("\nPlayer {} Penalty Time Remaining: {} seconds", j + 1,
-                        std::round(iter->currentlyPenalizedTimeRemaining));
+        std::string playerDisplayString = fmt::format(
+            "\n{}. Seconds remaining: {}", j + 1, std::round(iter->currentlyPenalizedTimeRemaining));
         leftTeamDisplayString += playerDisplayString;
         iter++;
         j++;
@@ -605,10 +604,14 @@ void StateAuxillary::updateHockeyDisplay()
         j = 0;
       }
     }
+    OSD::AddTypedMessage(OSD::MessageType::HockeyLeftTeamTotalPenalties, leftTeamDisplayString,
+                         OSD::Duration::SHORT, OSD::Color::CYAN);
   }
   j = 0;
-  if (hockeyRightTeamTotalPenalties >= 1)
+  if (hockeyRightTeamActivePenalty.size() >= 1)
   {
+    std::string rightTeamDisplayString =
+        fmt::format("Right Team Active Penalties \n", hockeyRightTeamTotalPenalties);
     std::vector<StateAuxillary::HockeyCharacterInfo>::iterator iter;
     for (iter = hockeyRightTeamActivePenalty.begin(); iter != hockeyRightTeamActivePenalty.end();)
     {
@@ -640,8 +643,7 @@ void StateAuxillary::updateHockeyDisplay()
                                          p.second.penaltyXAddress, p.second.penaltyYAddress});
                                          */
         std::string playerDisplayString =
-            fmt::format("\nPlayer {} Penalty Time Remaining: {} seconds", j + 1,
-                        std::round(iter->currentlyPenalizedTimeRemaining));
+            fmt::format("\n{}. Seconds remaining: {}", j + 1, std::round(iter->currentlyPenalizedTimeRemaining));
         rightTeamDisplayString += playerDisplayString;
         iter++;
         j++;
@@ -655,56 +657,7 @@ void StateAuxillary::updateHockeyDisplay()
         j = 0;
       }
     }
-
-    //for (auto& p : StateAuxillary::getHockeyRightTeamPenaltyCharacters())
-    //{
-    //  if (p.currentlyPenalizedTimeRemaining > 0)
-    //  {
-    //    float penaltyXAddress = rightPenaltyXAddresses.at(j);
-    //    float penaltyYAddress = penaltyYAddresses.at(j);
-    //    PowerPC::HostWrite_F32(penaltyXAddress, p.characterPointer + 0x520);
-    //    PowerPC::HostWrite_F32(penaltyYAddress, p.characterPointer + 0x524);
-    //    /*
-    //    INFO_LOG_FMT(CORE, "Player {} should have been sentenced to {}, {}", p.first,
-    //                 p.second.penaltyXAddress, p.second.penaltyYAddress);
-    //    INFO_LOG_FMT(CORE, "Player {} was sentenced to {}, {}", p.first,
-    //                 Memory::Read_U32(p.first + 0x520), Memory::Read_U32(p.first + 0x524));
-    //                 */
-    //    float remainingTime =
-    //        p.currentlyPenalizedTimeRemaining - (float(1) / float(60));
-    //    p.currentlyPenalizedTimeRemaining = remainingTime;
-    //    StateAuxillary::getHockeyRightTeamPenaltyCharacters()[j] = p;
-    //    INFO_LOG_FMT(CORE, "Updated Right Player with Queue Functionality: {}", p.currentlyPenalizedTimeRemaining);
-    //    /*
-    //    setHockeyRightTeamCharacterInfo(p.first,
-    //                                    {p.second.currentlyPenalized, remainingTime,
-    //                                     p.second.penaltyXAddress, p.second.penaltyYAddress});
-    //                                     */
-    //    std::string playerDisplayString =
-    //        fmt::format("\nPlayer {} Penalty Time Remaining: {} seconds", j + 1,
-    //                    std::round(p.currentlyPenalizedTimeRemaining));
-    //    rightTeamDisplayString += playerDisplayString;
-    //    /*
-    //    OSD::AddTypedMessage(OSD::MessageType(6 + i),
-    //                         fmt::format("Right Team Player {} Penalty Time Remaining: {} seconds",
-    //    i + 1, std::round(remainingTime)), OSD::Duration::SHORT, OSD::Color::YELLOW);
-    //    */
-    //  }
-    //  else
-    //  {
-    //    // setHockeyRightTeamCharacterInfo(p.first, {false, 20, p.second.penaltyXAddress,
-    //    // p.second.penaltyYAddress});
-    //    PowerPC::HostWrite_F32(0, p.characterPointer + 0x520);
-    //    PowerPC::HostWrite_F32(0, p.characterPointer + 0x524);
-    //    StateAuxillary::getHockeyRightTeamPenaltyCharacters().erase(
-    //        StateAuxillary::getHockeyRightTeamPenaltyCharacters().begin() + j);
-    //    j--;
-    //  }
-    //  j++;
-    //}
+    OSD::AddTypedMessage(OSD::MessageType::HockeyRightTeamTotalPenalties, rightTeamDisplayString,
+                         OSD::Duration::SHORT, OSD::Color::YELLOW);
   }
-  OSD::AddTypedMessage(OSD::MessageType::HockeyLeftTeamTotalPenalties, leftTeamDisplayString,
-                       OSD::Duration::SHORT, OSD::Color::CYAN);
-  OSD::AddTypedMessage(OSD::MessageType::HockeyRightTeamTotalPenalties, rightTeamDisplayString,
-                       OSD::Duration::SHORT, OSD::Color::YELLOW);
 }
