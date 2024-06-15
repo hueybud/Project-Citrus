@@ -333,7 +333,7 @@ void OnFrameEnd()
       if (!StateAuxillary::getCustomTrainingModeStart() && customTrainingCurrentWait > 130)
       {
         StateAuxillary::setCustomTrainingModeStart(true);
-        StateAuxillary::saveStateToTrainingBuffer2();
+        StateAuxillary::saveStateToTrainingBuffer();
         // size is in bytes. so for every word we want, we need 4 bytes (32-bit)
         //Memory::CopyFromEmu(trainingBufer.get(), 0x8160A9C0, 9694);
         return;
@@ -343,7 +343,7 @@ void OnFrameEnd()
         // reset possession change flag
         Memory::Write_U8(0, Metadata::addressCustomTrainingModePossessionChange);
         //Memory::CopyToEmu(0x8160A9C0, trainingBufer.get(), 9694);
-        StateAuxillary::loadStateFromTrainingBuffer2();
+        StateAuxillary::loadStateFromTrainingBuffer();
       }
       return;
     }
