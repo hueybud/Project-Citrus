@@ -48,6 +48,8 @@ bool Updater::CheckForUpdate()
 
 void Updater::OnUpdateAvailable(std::string info)
 {
+  // ROCCI
+  /*
   // bool later = false;
   m_update_available = true;
 
@@ -105,7 +107,7 @@ void Updater::OnUpdateAvailable(std::string info)
       layout->addWidget(buttons);
 
       return dialog->exec();
-    }); 
+    });
   }
   else
   {
@@ -134,6 +136,7 @@ void Updater::OnUpdateAvailable(std::string info)
     layout->addWidget(buttons);
 
     return dialog->exec();
-    }); 
+    });
   }
+  */
 }

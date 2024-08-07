@@ -67,6 +67,8 @@ add_library(core
   Debugger/PPCDebugInterface.h
   Debugger/RSO.cpp
   Debugger/RSO.h
+  DefaultGeckoCodes.cpp
+  DefaultGeckoCodes.h
   DolphinAnalytics.cpp
   DolphinAnalytics.h
   DSP/DSPAccelerator.cpp
@@ -408,6 +410,8 @@ add_library(core
   LibusbUtils.h
   MemTools.cpp
   MemTools.h
+  Metadata.cpp
+  Metadata.h
   Movie.cpp
   Movie.h
   NetPlayClient.cpp

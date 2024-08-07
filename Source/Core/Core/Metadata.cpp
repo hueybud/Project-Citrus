@@ -156,10 +156,13 @@ std::string Metadata::getJSONString()
   json_stream << "  \"isRanked\": \"" << StateAuxillary::getIsRanked() << "\"," << std::endl;
   json_stream << "  \"submittedBy\": \"" << submittedBy << "\"," << std::endl;
   std::string md5String = "";
+  // ROCCI
+  /*
   for (int i = 0; i < md5Hash.size(); i++)
   {
     md5String += std::format("{:x}", md5Hash[i]);
   }
+  */
   json_stream << "  \"Game Hash\": \"" << md5String << "\"," << std::endl;
   json_stream << "  \"Controller Port Info\": {" << std::endl;
   for (int i = 0; i < 4; i++)
@@ -261,14 +264,14 @@ std::string Metadata::getJSONString()
       json_stream << "    [" << std::to_string(leftTeamItemVector.at(i).itemID) << ","
                   << std::to_string(leftTeamItemVector.at(i).itemAmount) << ","
                   << leftTeamItemVector.at(i).itemTime << "]"
-                  << "," << std::endl; 
+                  << "," << std::endl;
     }
     else
     {
       json_stream << "    [" << std::to_string(leftTeamItemVector.at(i).itemID) << ","
                   << std::to_string(leftTeamItemVector.at(i).itemAmount) << ","
                   << leftTeamItemVector.at(i).itemTime << "]"
-                  << std::endl; 
+                  << std::endl;
     }
   }
   // add a comma once we add right team items to line below
@@ -444,7 +447,7 @@ void Metadata::writeJSON(std::string jsonString, bool callBatch)
   CoTaskMemFree(path);
   std::string documents_file_path(strpath.begin(), strpath.end());
   std::string replays_path = "\"";
-  replays_path += documents_file_path;                   
+  replays_path += documents_file_path;
   replays_path += "\\Citrus Replays";
   // "C://Users//Brian//Documents//Citrus Replays
   std::string json_output_path = documents_file_path + "\\Citrus Replays";
@@ -553,7 +556,7 @@ void Metadata::writeJSON(std::string jsonString, bool callBatch)
       if (c == '/')
         c = '\\';
     }
-    
+
     paths.push_back(std::wstring_convert<std::codecvt_utf8<wchar_t>>().from_bytes(exampleFile2));
     paths.push_back(std::wstring_convert<std::codecvt_utf8<wchar_t>>().from_bytes(exampleFile3));
     if (File::Exists(exampleFile4))
@@ -570,6 +573,9 @@ void Metadata::writeJSON(std::string jsonString, bool callBatch)
     if (zf == NULL)
       return;
     bool _return = true;
+
+    // ROCCI
+    /*
     for (size_t i = 0; i < paths.size(); i++)
     {
       std::fstream file(paths[i].c_str(), std::ios::binary | std::ios::in);
@@ -603,7 +609,7 @@ void Metadata::writeJSON(std::string jsonString, bool callBatch)
       }
       _return = false;
     }
-
+    */
     OSD::ClearMessages();
     if (zipClose(zf, NULL)) {
       Core::DisplayMessage("Done saving replay", 2000);

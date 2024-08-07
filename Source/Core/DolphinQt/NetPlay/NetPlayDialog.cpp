@@ -874,7 +874,7 @@ void NetPlayDialog::DisplayActiveGeckoCodes()
     return;
   }
   Settings::Instance().GetNetPlayClient()->GetActiveGeckoCodes();
-} 
+}
 
 void NetPlayDialog::OnMsgChangeGame(const NetPlay::SyncIdentifier& sync_identifier,
                                     const std::string& netplay_name)
@@ -1159,9 +1159,12 @@ void NetPlayDialog::OnLoginError(CitrusRequest::LoginError error)
     auto* projectcitrus1 = buttons1->addButton(tr("Open User File"), QDialogButtonBox::AcceptRole);
 
     connect(projectcitrus1, &QPushButton::clicked, this, [userJSONPath, dialog1]() {
+      // ROCCI
+      /*
       std::string pathToAppData = "\"" + userJSONPath + "\"";
       ShellExecuteA(NULL, "open", &pathToAppData[0], NULL, NULL, SW_HIDE);
       dialog1->close();
+      */
     });
 
     auto* layout1 = new QVBoxLayout;
@@ -1190,6 +1193,8 @@ void NetPlayDialog::OnLoginError(CitrusRequest::LoginError error)
         buttons->addButton(tr("Launch Citrus Launcher"), QDialogButtonBox::AcceptRole);
 
     connect(projectcitrus, &QPushButton::clicked, this, [citrusLauncherEXEPath]() {
+      // ROCCI
+      /*
       std::string pathToAppData = "\"" + citrusLauncherEXEPath + "\"";
       STARTUPINFO si;
       PROCESS_INFORMATION pi;
@@ -1197,6 +1202,7 @@ void NetPlayDialog::OnLoginError(CitrusRequest::LoginError error)
       si.cb = sizeof(si);
       CreateProcessA(NULL, &pathToAppData[0], NULL, NULL, TRUE, CREATE_NO_WINDOW, NULL, NULL,
                      (LPSTARTUPINFOA)&si, &pi);
+      */
     });
 
     auto* layout = new QVBoxLayout;

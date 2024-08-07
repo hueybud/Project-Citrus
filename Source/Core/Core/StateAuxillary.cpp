@@ -331,7 +331,10 @@ void StateAuxillary::endPlayback()
     std::string innerFileName = replays_path + fileArr[i];
     if (File::Exists(innerFileName))
     {
+      // ROCCI
+      /*
       std::filesystem::remove(innerFileName);
+      */
     }
   }
 }
@@ -450,7 +453,7 @@ void StateAuxillary::hockeyModeInit()
   std::vector<float> penaltyYAddresses = {-.75, -.25, .25, .75};
   */
 
-  
+
   // bench stack
   /*
   std::vector<float> leftPenaltyXAddresses = {-12, -11, -10, -9};
