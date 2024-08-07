@@ -19,6 +19,8 @@ add_library(core
   CheatGeneration.h
   CheatSearch.cpp
   CheatSearch.h
+  CitrusUser.cpp
+  CitrusUser.h
   CommonTitles.h
   Config/DefaultLocale.cpp
   Config/DefaultLocale.h
@@ -472,6 +474,8 @@ add_library(core
   PowerPC/SignatureDB/SignatureDB.cpp
   PowerPC/SignatureDB/SignatureDB.h
   State.cpp
+  State.h
+  StateAuxillary.cpp
   State.h
   SyncIdentifier.h
   SysConf.cpp

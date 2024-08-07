@@ -9,6 +9,8 @@ add_library(common
   CDUtils.cpp
   CDUtils.h
   ChunkFile.h
+  CitrusRequest.cpp
+  CitrusRequest.h
   CodeBlock.h
   ColorUtil.cpp
   ColorUtil.h

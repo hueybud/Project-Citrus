@@ -26,7 +26,7 @@ std::string CitrusRequest::GetCurrentBaseURL()
   }
 
   return "https://localhost:3000";
-  
+
 }
 
 CitrusRequest::LoginError CitrusRequest::LogInUser(std::string userId, std::string jwt)
@@ -56,7 +56,7 @@ CitrusRequest::LoginError CitrusRequest::LogInUser(std::string userId, std::stri
   INFO_LOG_FMT(COMMON, "Login request JSON response: {}", contents);
 
   picojson::value json;
-  const std::string err = picojson::parse(json, contents); 
+  const std::string err = picojson::parse(json, contents);
   if (!err.empty())
   {
     INFO_LOG_FMT(COMMON, "Invalid JSON received from login request: {}", err);
