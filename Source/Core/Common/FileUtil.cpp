@@ -1117,6 +1117,8 @@ bool ReadFileToString(const std::string& filename, std::string& str)
 
 std::string GetAppDataPath()
 {
+  // ROCCI
+  /*
   char* appDataPath;
   size_t len;
   _dupenv_s(&appDataPath, &len, "APPDATA");
@@ -1124,26 +1126,38 @@ std::string GetAppDataPath()
   std::string appDataString = appDataPath;
   free(appDataPath);
   return appDataString;
+  */
+  return "";
 }
 
 std::string GetCitrusLauncherEXEPath()
 {
+  // ROCCI
+  /*
   std::string appDataPath = GetAppDataPath();
   // C:/Users/Brian/AppData/Roaming
   appDataPath.replace(appDataPath.find("Roaming"), sizeof("Roaming") - 1, "Local");
   // C:/Users/Brian/AppData/Local
   appDataPath += "\\Programs\\citruslauncher\\Citrus Launcher.exe";
   return appDataPath;
+  */
+  return "";
 }
 
 static std::vector<std::string> citrusUserFilePaths = {
+  // ROCCI
+  /*
     GetExeDirectory() + "\\user.json",
     GetAppDataPath() + "\\citruslauncher" + "\\user.json"
+    */
+  "",""
 };
 
 // Used for telling the user where we looked for the user.json file when we didn't find it
 std::string ListPossibleCitrusUserFilePaths()
 {
+  // ROCCI
+  /*
   std::string allPaths = "";
   for (int i = 0; i < citrusUserFilePaths.size(); i++)
   {
@@ -1157,10 +1171,14 @@ std::string ListPossibleCitrusUserFilePaths()
     }
   }
   return allPaths;
+  */
+  return "";
 }
 
 std::string GetCitrusUserFilePath()
 {
+  // ROCCI
+  /*
   // Working belief is that Citrus Launcher will put user.json at:
   // C:\Users\Brian\AppData\Roaming\citruslauncher\dolphin\x64\user.json
 
@@ -1178,7 +1196,8 @@ std::string GetCitrusUserFilePath()
                         "AppData\\Roaming\\citruslauncher");
 
   return "";
-
+  */
+  return "";
 }
 
 }  // namespace File

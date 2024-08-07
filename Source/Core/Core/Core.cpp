@@ -176,6 +176,8 @@ void FrameUpdateOnCPUThread()
 
 std::wstring GetEnvString()
 {
+  // ROCCI
+  /*
   wchar_t* env = GetEnvironmentStrings();
   if (!env)
     abort();
@@ -190,6 +192,11 @@ std::wstring GetEnvString()
   std::wstring result(env, totallen);
   FreeEnvironmentStrings(env);
   return result;
+
+  */
+  char buf1[] = "";
+  std::wstring ws(&buf1[0], &buf1[0]);
+  return ws;
 }
 
 void OnFrameEnd()
@@ -521,7 +528,7 @@ void OnFrameEnd()
   {
     // let's start with every 5 seconds (estimated to be 300 frames)
     int framesBetweenSavestates = 300;
-    // 
+    //
     // generate save state every five seconds by viewing movie frame number and dividing
     // we load the .sav file later, not the .dtm.sav
     u64 currentFrame = Movie::GetCurrentFrame();

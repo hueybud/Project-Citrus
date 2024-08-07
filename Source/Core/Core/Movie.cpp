@@ -74,7 +74,8 @@ namespace fs = std::filesystem;
 
 #include "InputCommon/GCPadStatus.h"
 
-#include <direct.h>
+// ROCCI
+//#include <direct.h>
 #include "VideoCommon/VideoBackendBase.h"
 #include "VideoCommon/VideoConfig.h"
 #include "Core/StateAuxillary.h"
@@ -1093,7 +1094,10 @@ bool PlayInput(const std::string& movie_path, std::optional<std::string>* savest
       {
         // Entry is a directory, so create it.
         printf("dir:%s\n", filename);
+        // ROCCI
+        /*
         _mkdir(filename);
+        */
       }
       else
       {
@@ -1184,6 +1188,8 @@ bool PlayInput(const std::string& movie_path, std::optional<std::string>* savest
       std::string dolphinDriveLetter = (File::GetExeDirectory().substr(0, 1) + ":");
       batchPath += " " + pathToDiff + " " + pathToSaveState + " " + pathToEXE + " " + dolphinDriveLetter + "\"";
       INFO_LOG_FMT(CORE, "Batch args for patching the diff is {}", batchPath);
+      // ROCCI
+      /*
       STARTUPINFO si;
       PROCESS_INFORMATION pi;
       memset(&si, 0, sizeof(si));
@@ -1200,7 +1206,9 @@ bool PlayInput(const std::string& movie_path, std::optional<std::string>* savest
       // the task has ended so close the handle
       CloseHandle(pi.hThread);
       CloseHandle(pi.hProcess);
+      */
     }
+
   }
 
   File::IOFile recording_file(actual_movie_path, "rb");
