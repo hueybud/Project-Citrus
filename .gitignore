@@ -12,6 +12,7 @@ Source/Core/Common/scmrev.h
 # Ignore files output by Android cmake build
 /Source/Android/app/.cxx/
 /libs/
+/.cache/
 # Ignore various files created by visual studio/msbuild
 *.ipch
 *.opensdf
@@ -45,3 +46,4 @@ CMakeLists.txt.user
 /Source/Core/DolphinQt/output.json
 *.lnk
 /Source/Core/DolphinQt/log.txt
+*.kate-swp

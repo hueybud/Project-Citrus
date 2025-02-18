@@ -1117,31 +1117,51 @@ bool ReadFileToString(const std::string& filename, std::string& str)
 
 std::string GetAppDataPath()
 {
-  // ROCCI
-  /*
-  char* appDataPath;
-  size_t len;
-  _dupenv_s(&appDataPath, &len, "APPDATA");
-  // C:/Users/Brian/AppData/Roaming
-  std::string appDataString = appDataPath;
-  free(appDataPath);
-  return appDataString;
-  */
-  return "";
+  #ifdef _WIN32
+    char* appDataPath;
+    size_t len;
+    _dupenv_s(&appDataPath, &len, "APPDATA");
+    // C:/Users/Brian/AppData/Roaming
+    std::string appDataString = appDataPath;
+    free(appDataPath);
+    return appDataString;
+  #else
+    const char* appDataPath = std::getenv("XDG_CONFIG_HOME");
+    if (appDataPath == nullptr) {
+      // fallback to $HOME if XDG_CONFIG_HOME is not set
+      appDataPath = std::getenv("HOME");
+      if (appDataPath == nullptr) {
+        return ""; // if HOME is not set, return an empty string
+      }
+    }
+    return std::string(appDataPath) + "/.config"; // typical path to config directory
+  #endif
 }
 
 std::string GetCitrusLauncherEXEPath()
 {
-  // ROCCI
-  /*
-  std::string appDataPath = GetAppDataPath();
-  // C:/Users/Brian/AppData/Roaming
-  appDataPath.replace(appDataPath.find("Roaming"), sizeof("Roaming") - 1, "Local");
-  // C:/Users/Brian/AppData/Local
-  appDataPath += "\\Programs\\citruslauncher\\Citrus Launcher.exe";
-  return appDataPath;
-  */
-  return "";
+  #if _WIN32
+
+    std::string appDataPath = GetAppDataPath();
+    // C:/Users/Brian/AppData/Roaming
+    appDataPath.replace(appDataPath.find("Roaming"), sizeof("Roaming") - 1, "Local");
+    // C:/Users/Brian/AppData/Local
+    appDataPath += "\\Programs\\citruslauncher\\Citrus Launcher.exe";
+    return appDataPath;
+  #else
+
+    // Get the config home directory, falling back to ~/.config if not set
+    const char* configHome = std::getenv("XDG_CONFIG_HOME");
+    if (configHome == nullptr) {
+      configHome = std::getenv("HOME");
+      if (configHome == nullptr) {
+        return "";  // If HOME is not set, return an empty string
+      }
+    }
+
+    // Define the path based on the config directory, replacing Windows path with Linux path
+    std::string appDataPath = std::string(configHome);
+  #endif
 }
 
 static std::vector<std::string> citrusUserFilePaths = {
