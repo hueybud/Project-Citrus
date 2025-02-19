@@ -16,7 +16,7 @@ set(CMAKE_OSX_DEPLOYMENT_TARGET "10.14.0" CACHE STRING "")
 
 set(CMAKE_USER_MAKE_RULES_OVERRIDE "CMake/FlagsOverride.cmake")
 
-project(dolphin-emu)
+project(citrus-dolphin)
 
 # Name of the Dolphin distributor. If you redistribute Dolphin builds (forks,
 # unofficial builds) please consider identifying your distribution with a
@@ -128,6 +128,7 @@ endif()
 # here.  You must run "make install" to install these to the proper location
 # as defined above.
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Binaries)
+set(CMAKE_RUNTIME_OUTPUT_NAME "citrus-dolphin")
 
 if (WIN32)
   set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/Binary)
@@ -574,14 +575,14 @@ if (_M_X86)
 endif()
 add_subdirectory(Externals/cpp-optparse)
 
-find_package(fmt 8.0)
-if(fmt_FOUND)
-  message(STATUS "Using shared fmt ${fmt_VERSION}")
-else()
+#find_package(fmt 8.0)
+#if(fmt_FOUND)
+#  message(STATUS "Using shared fmt ${fmt_VERSION}")
+#else()
   check_vendoring_approved(fmt)
   message(STATUS "Using static fmt from Externals")
   add_subdirectory(Externals/fmt EXCLUDE_FROM_ALL)
-endif()
+#endif()
 add_subdirectory(Externals/imgui)
 add_subdirectory(Externals/glslang)
 
