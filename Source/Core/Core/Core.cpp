@@ -174,31 +174,6 @@ void FrameUpdateOnCPUThread()
     NetPlay::NetPlayClient::SendTimeBase();
 }
 
-std::wstring GetEnvString()
-{
-  // ROCCI
-  /*
-  wchar_t* env = GetEnvironmentStrings();
-  if (!env)
-    abort();
-  const wchar_t* var = env;
-  size_t totallen = 0;
-  size_t len;
-  while ((len = wcslen(var)) > 0)
-  {
-    totallen += len + 1;
-    var += len + 1;
-  }
-  std::wstring result(env, totallen);
-  FreeEnvironmentStrings(env);
-  return result;
-
-  */
-  char buf1[] = "";
-  std::wstring ws(&buf1[0], &buf1[0]);
-  return ws;
-}
-
 void OnFrameEnd()
 {
 #ifdef USE_MEMORYWATCHER
