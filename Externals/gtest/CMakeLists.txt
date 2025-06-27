@@ -44,13 +44,7 @@ endif()
 # as ${gtest_SOURCE_DIR} and to the root binary directory as
 # ${gtest_BINARY_DIR}.
 # Language "C" is required for find_package(Threads).
-if (CMAKE_VERSION VERSION_LESS 3.0)
-  project(gtest CXX C)
-else()
-  cmake_policy(SET CMP0048 NEW)
-  project(gtest VERSION 1.9.0 LANGUAGES CXX C)
-endif()
-cmake_minimum_required(VERSION 2.8.12)
+cmake_minimum_required(VERSION 3.5.0)
 
 if (POLICY CMP0063) # Visibility
   cmake_policy(SET CMP0063 NEW)
@@ -86,7 +80,7 @@ include_directories(
 if (MSVC AND MSVC_VERSION EQUAL 1700)
   add_definitions(/D _VARIADIC_MAX=10)
 endif()
- 
+
 ########################################################################
 #
 # Defines the gtest & gtest_main libraries.  User tests should link
