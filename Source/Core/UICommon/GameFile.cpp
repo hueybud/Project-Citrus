@@ -291,8 +291,9 @@ void GameFile::DownloadDefaultCover()
   }
 
   Common::HttpRequest request;
-  constexpr char cover_url[] = "https://art.gametdb.com/wii/cover/{}/{}.png";
-  const auto response = request.Get(fmt::format(cover_url, region_code, m_gametdb_id));
+  //constexpr char cover_url[] = "https://art.gametdb.com/wii/cover/{}/{}.png";
+  const auto response = request.Get(
+      fmt::format("https://art.gametdb.com/wii/cover/{}/{}.png", region_code, m_gametdb_id));
 
   if (!response)
     return;
