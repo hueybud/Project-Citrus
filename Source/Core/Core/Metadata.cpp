@@ -156,13 +156,16 @@ std::string Metadata::getJSONString()
   json_stream << "  \"isRanked\": \"" << StateAuxillary::getIsRanked() << "\"," << std::endl;
   json_stream << "  \"submittedBy\": \"" << submittedBy << "\"," << std::endl;
   std::string md5String = "";
-  // ROCCI
-  /*
+
+  // Cross-platform MD5 string conversion
+  std::ostringstream md5Stream;
+  md5Stream << std::hex << std::setfill('0');
   for (int i = 0; i < md5Hash.size(); i++)
   {
-    md5String += std::format("{:x}", md5Hash[i]);
+    md5Stream << std::setw(2) << static_cast<unsigned>(md5Hash[i]);
   }
-  */
+  md5String = md5Stream.str();
+
   json_stream << "  \"Game Hash\": \"" << md5String << "\"," << std::endl;
   json_stream << "  \"Controller Port Info\": {" << std::endl;
   for (int i = 0; i < 4; i++)
