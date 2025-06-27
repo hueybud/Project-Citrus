@@ -38,6 +38,7 @@ CMakeLists.txt.user
 *.kdev4
 # Ignore IDEA/Clion files/dirs
 /.idea/
+/Source/.idea/
 # Ignore Visual Studio Code's working dir
 /.vscode/
 /Source/Core/DolphinQt/uh.dtm
@@ -47,3 +48,4 @@ CMakeLists.txt.user
 *.lnk
 /Source/Core/DolphinQt/log.txt
 *.kate-swp
+# i think these are rider files
