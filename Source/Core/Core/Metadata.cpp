@@ -14,13 +14,6 @@
 #include "Core.h"
 #include <VideoCommon/OnScreenDisplay.h>
 
-#ifdef __linux__
-#include <filesystem>
-#include <fstream>
-#include <vector>
-#include <string>
-#endif
-
 // debugging purposes
 #include <iostream>
 

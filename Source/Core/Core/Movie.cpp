@@ -1094,10 +1094,7 @@ bool PlayInput(const std::string& movie_path, std::optional<std::string>* savest
       {
         // Entry is a directory, so create it.
         printf("dir:%s\n", filename);
-        // ROCCI
-        /*
-        _mkdir(filename);
-        */
+        std::filesystem::create_directory(filename);
       }
       else
       {
