@@ -552,7 +552,7 @@ void Metadata::writeJSON(std::string jsonString, bool callBatch)
     // https://stackoverflow.com/questions/11370908/how-do-i-use-minizip-on-zlib
     std::vector<std::wstring> paths;
 
-		// make the paths windows friendly
+    // make the paths windows friendly
     for (char& c : exampleFile1)
     {
       if (c == '/')
