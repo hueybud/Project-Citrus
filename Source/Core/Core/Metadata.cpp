@@ -547,29 +547,12 @@ void Metadata::writeJSON(std::string jsonString, bool callBatch)
     // the task has ended so close the handle
     CloseHandle(pi.hThread);
     CloseHandle(pi.hProcess);
-    #elif defined(__linux__)
-    std::string pathToScript = File::GetExeDirectory() + "/" + "creatediff.sh";
-    std::string pathToSaveState = File::GetUserPath(D_CITRUSREPLAYS_IDX) + "output.dtm.sav";
-    std::string pathToDiff = File::GetUserPath(D_CITRUSREPLAYS_IDX) + "diffFile.patch";
-    std::string pathToDirectory = File::GetExeDirectory();
 
-    std::string command = pathToScript + " " +
-      pathToSaveState + " " +
-      pathToDiff + " " +
-      pathToDirectory;
-
-    int result = system(command.c_str());
-    if (result != 0) {
-      std::cout << "creatediff execution failed with code " << result << std::endl;
-    }
-
-    #endif
     //WinExec(batchPath.c_str(), SW_HIDE);
     // https://stackoverflow.com/questions/11370908/how-do-i-use-minizip-on-zlib
     std::vector<std::wstring> paths;
 
 		// make the paths windows friendly
-    #ifdef _WIN32
     for (char& c : exampleFile1)
     {
       if (c == '/')
@@ -590,7 +573,6 @@ void Metadata::writeJSON(std::string jsonString, bool callBatch)
       if (c == '/')
         c = '\\';
     }
-    #endif
 
     paths.push_back(std::wstring_convert<std::codecvt_utf8<wchar_t>>().from_bytes(exampleFile2));
     paths.push_back(std::wstring_convert<std::codecvt_utf8<wchar_t>>().from_bytes(exampleFile3));
@@ -602,6 +584,35 @@ void Metadata::writeJSON(std::string jsonString, bool callBatch)
     {
       paths.push_back(std::wstring_convert<std::codecvt_utf8<wchar_t>>().from_bytes(exampleFile1));
     }
+    #elif defined(__linux__)
+    std::string pathToScript = File::GetExeDirectory() + "/" + "creatediff.sh";
+    std::string pathToSaveState = File::GetUserPath(D_CITRUSREPLAYS_IDX) + "output.dtm.sav";
+    std::string pathToDiff = File::GetUserPath(D_CITRUSREPLAYS_IDX) + "diffFile.patch";
+    std::string pathToDirectory = File::GetExeDirectory();
+
+    std::string command = pathToScript + " " +
+      pathToSaveState + " " +
+      pathToDiff + " " +
+      pathToDirectory;
+
+    int result = system(command.c_str());
+    if (result != 0) {
+      std::cout << "creatediff execution failed with code " << result << std::endl;
+    }
+
+    std::vector<std::string> paths;
+
+    paths.push_back(exampleFile2);
+    paths.push_back(exampleFile3);
+    if (File::Exists(exampleFile4))
+    {
+      paths.push_back(exampleFile4);
+    }
+    else
+    {
+      paths.push_back(exampleFile1);
+    }
+    #endif
     std::string zipName = File::GetUserPath(D_CITRUSREPLAYS_IDX) + gameTime + ".cit ";
 
     zipFile zf = zipOpen(zipName.c_str(), APPEND_STATUS_CREATE);
@@ -609,7 +620,7 @@ void Metadata::writeJSON(std::string jsonString, bool callBatch)
       return;
     bool _return = true;
 
-    #ifdef _WIN32
+    //#ifdef _WIN32
     for (size_t i = 0; i < paths.size(); i++)
     {
       std::fstream file(paths[i].c_str(), std::ios::binary | std::ios::in);
@@ -644,7 +655,7 @@ void Metadata::writeJSON(std::string jsonString, bool callBatch)
       }
       _return = false;
     }
-    #endif
+    //#endif
 
     OSD::ClearMessages();
     if (zipClose(zf, NULL)) {
