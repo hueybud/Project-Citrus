@@ -15,9 +15,10 @@
 #include <VideoCommon/OnScreenDisplay.h>
 
 #ifdef __linux__
-#include <unistd.h>
-#include <sys/wait.h>
-#include <cstring>
+#include <filesystem>
+#include <fstream>
+#include <vector>
+#include <string>
 #endif
 
 // debugging purposes
@@ -512,6 +513,12 @@ void Metadata::writeJSON(std::string jsonString, bool callBatch)
     std::ostream_iterator<unsigned char> output_iterator(output_file);
     std::copy(out.begin(), out.end(), output_iterator);
     */
+
+    std::string exampleFile1 = File::GetUserPath(D_CITRUSREPLAYS_IDX) + "output.dtm.sav";
+    std::string exampleFile2 = File::GetUserPath(D_CITRUSREPLAYS_IDX) + "output.dtm";
+    std::string exampleFile3 = File::GetUserPath(D_CITRUSREPLAYS_IDX) + "output.json";
+    std::string exampleFile4 = File::GetUserPath(D_CITRUSREPLAYS_IDX) + "diffFile.patch";
+
     #ifdef _WIN32
     std::filesystem::path cwd = File::GetExeDirectory() + "\\" + "creatediff.bat";
     std::string pathToBatch = cwd.string();
@@ -560,13 +567,9 @@ void Metadata::writeJSON(std::string jsonString, bool callBatch)
     //WinExec(batchPath.c_str(), SW_HIDE);
     // https://stackoverflow.com/questions/11370908/how-do-i-use-minizip-on-zlib
     std::vector<std::wstring> paths;
-    std::string exampleFile1 = File::GetUserPath(D_CITRUSREPLAYS_IDX) + "output.dtm.sav";
-    std::string exampleFile2 = File::GetUserPath(D_CITRUSREPLAYS_IDX) + "output.dtm";
-    std::string exampleFile3 = File::GetUserPath(D_CITRUSREPLAYS_IDX) + "output.json";
-    std::string exampleFile4 = File::GetUserPath(D_CITRUSREPLAYS_IDX) + "diffFile.patch";
 
 		// make the paths windows friendly
-		#ifdef _WIN32
+    #ifdef _WIN32
     for (char& c : exampleFile1)
     {
       if (c == '/')
@@ -587,7 +590,7 @@ void Metadata::writeJSON(std::string jsonString, bool callBatch)
       if (c == '/')
         c = '\\';
     }
-		#endif
+    #endif
 
     paths.push_back(std::wstring_convert<std::codecvt_utf8<wchar_t>>().from_bytes(exampleFile2));
     paths.push_back(std::wstring_convert<std::codecvt_utf8<wchar_t>>().from_bytes(exampleFile3));
@@ -606,8 +609,7 @@ void Metadata::writeJSON(std::string jsonString, bool callBatch)
       return;
     bool _return = true;
 
-    // ROCCI
-    /*
+    #ifdef _WIN32
     for (size_t i = 0; i < paths.size(); i++)
     {
       std::fstream file(paths[i].c_str(), std::ios::binary | std::ios::in);
@@ -621,7 +623,8 @@ void Metadata::writeJSON(std::string jsonString, bool callBatch)
         if (size == 0 || file.read(&buffer[0], size))
         {
           zip_fileinfo zfi = {0};
-          std::wstring fileName = paths[i].substr(paths[i].rfind('\\') + 1);
+          size_t last_slash = paths[i].find_last_of("\\/");
+          std::string fileName = paths[i].substr(last_slash + 1);
 
           if (ZIP_OK == zipOpenNewFileInZip(zf, std::string(fileName.begin(), fileName.end()).c_str(),
                                           &zfi, NULL, 0, NULL, 0, NULL, Z_DEFLATED,
@@ -641,7 +644,8 @@ void Metadata::writeJSON(std::string jsonString, bool callBatch)
       }
       _return = false;
     }
-    */
+    #endif
+
     OSD::ClearMessages();
     if (zipClose(zf, NULL)) {
       Core::DisplayMessage("Done saving replay", 2000);
