@@ -540,21 +540,21 @@ void Metadata::writeJSON(std::string jsonString, bool callBatch)
     // the task has ended so close the handle
     CloseHandle(pi.hThread);
     CloseHandle(pi.hProcess);
-		#elif defined(__linux__)
-		std::string pathToScript = File::GetExeDirectory() + "/" + "creatediff.sh";
-		std::string pathToSaveState = File::GetUserPath(D_CITRUSREPLAYS_IDX) + "output.dtm.sav";
-		std::string pathToDiff = File::GetUserPath(D_CITRUSREPLAYS_IDX) + "diffFile.patch";
-		std::string pathToDirectory = File::GetExeDirectory();
+    #elif defined(__linux__)
+    std::string pathToScript = File::GetExeDirectory() + "/" + "creatediff.sh";
+    std::string pathToSaveState = File::GetUserPath(D_CITRUSREPLAYS_IDX) + "output.dtm.sav";
+    std::string pathToDiff = File::GetUserPath(D_CITRUSREPLAYS_IDX) + "diffFile.patch";
+    std::string pathToDirectory = File::GetExeDirectory();
 
-		std::string command = pathToScript + " " +
-    	pathToSaveState + " " +
-    	pathToDiff + " " +
-    	pathToDirectory;
+    std::string command = pathToScript + " " +
+      pathToSaveState + " " +
+      pathToDiff + " " +
+      pathToDirectory;
 
-		int result = system(command.c_str());
-		if (result != 0) {
-			std::cout << "creatediff execution failed with code " << result << std::endl;
-		}
+    int result = system(command.c_str());
+    if (result != 0) {
+      std::cout << "creatediff execution failed with code " << result << std::endl;
+    }
 
     #endif
     //WinExec(batchPath.c_str(), SW_HIDE);
