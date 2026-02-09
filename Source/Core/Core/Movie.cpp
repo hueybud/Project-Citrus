@@ -46,6 +46,7 @@ namespace fs = std::filesystem;
 #include "Core/ConfigManager.h"
 #include "Core/Core.h"
 #include "Core/CoreTiming.h"
+#include "Core/GameStateFrame.h"
 #include "Core/DSP/DSPCore.h"
 #include "Core/HW/CPU.h"
 #include "Core/HW/DVD/DVDInterface.h"
@@ -102,6 +103,7 @@ static PlayMode s_playMode = PlayMode::None;
 static std::array<ControllerType, 4> s_controllers{};
 static std::array<bool, 4> s_wiimotes{};
 static ControllerState s_padState;
+static std::array<GCPadStatus, 4> s_last_pad_status{};  // Cache of last played/recorded pad status
 static DTMHeader tmpHeader;
 static std::vector<u8> s_temp_input;
 static u64 s_currentByte = 0;
@@ -390,6 +392,13 @@ u64 GetCurrentLagCount()
 u64 GetTotalLagCount()
 {
   return s_totalLagCount;
+}
+
+GCPadStatus GetLastPadStatus(int controllerID)
+{
+  if (controllerID < 0 || controllerID >= 4)
+    return GCPadStatus{};
+  return s_last_pad_status[controllerID];
 }
 
 void SetClearSave(bool enabled)
@@ -900,6 +909,9 @@ void RecordInput(const GCPadStatus* PadStatus, int controllerID)
     return;
 
   CheckPadStatus(PadStatus, controllerID);
+
+  // Cache the pad status for CITF capture
+  s_last_pad_status[controllerID] = *PadStatus;
 
   s_temp_input.resize(s_currentByte + sizeof(ControllerState));
   memcpy(&s_temp_input[s_currentByte], &s_padState, sizeof(ControllerState));
@@ -1521,6 +1533,21 @@ void PlayController(GCPadStatus* PadStatus, int controllerID)
 
   if (s_padState.reset)
     ProcessorInterface::ResetButton_Tap();
+
+  // Debug logging for CITF capture
+  static int play_debug = 0;
+  if (controllerID == 0 && play_debug < 3)
+  {
+    INFO_LOG_FMT(CORE, "PlayController Frame {} Controller {}: button=0x{:04X} stick=({},{}) cstick=({},{}) L={} R={}",
+                 play_debug, controllerID, PadStatus->button,
+                 PadStatus->stickX, PadStatus->stickY,
+                 PadStatus->substickX, PadStatus->substickY,
+                 PadStatus->triggerLeft, PadStatus->triggerRight);
+    play_debug++;
+  }
+
+  // Cache the pad status for CITF capture
+  s_last_pad_status[controllerID] = *PadStatus;
 
   SetInputDisplayString(s_padState, controllerID);
   CheckInputEnd();

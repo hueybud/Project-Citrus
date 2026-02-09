@@ -36,15 +36,19 @@
     <ClInclude Include="Common\CitrusRequest.h" />
     <ClInclude Include="Core\CitrusUser.h" />
     <ClInclude Include="Core\DefaultGeckoCodes.h" />
+    <ClInclude Include="Core\GameStateFrame.h" />
     <ClInclude Include="Core\Metadata.h" />
     <ClInclude Include="Core\StateAuxillary.h" />
+    <ClInclude Include="Core\StrikersPadHook.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="Common\CitrusRequest.cpp" />
     <ClCompile Include="Core\CitrusUser.cpp" />
     <ClCompile Include="Core\DefaultGeckoCodes.cpp" />
+    <ClCompile Include="Core\GameStateFrame.cpp" />
     <ClCompile Include="Core\Metadata.cpp" />
     <ClCompile Include="Core\StateAuxillary.cpp" />
+    <ClCompile Include="Core\StrikersPadHook.cpp" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets" />

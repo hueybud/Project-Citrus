@@ -189,6 +189,7 @@ void PlayController(GCPadStatus* PadStatus, int controllerID);
 bool PlayWiimote(int wiimote, WiimoteCommon::DataReportBuilder& rpt, int ext,
                  const WiimoteEmu::EncryptionKey& key);
 void EndPlayInput(bool cont);
+GCPadStatus GetLastPadStatus(int controllerID);
 void SaveRecording(const std::string& filename);
 void DoState(PointerWrap& p);
 void Shutdown();

@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include "Core/Core.h"
+#include "Core/GameStateFrame.h"
 #include "Core/StateAuxillary.h"
 #include "Core/Metadata.h"
 #include "Core/DefaultGeckoCodes.h"
@@ -198,6 +199,13 @@ void OnFrameEnd()
   if (s_memory_watcher)
     s_memory_watcher->Step();
 #endif
+
+  // During replay playback, capture game state each frame
+  if (GameStateCapture::IsCapturing())
+  {
+    GameStateCapture::CaptureFrame();
+  }
+
   /*
   if (Movie::IsPlayingInput() || isPlayback)
   {
@@ -348,6 +356,12 @@ void OnFrameEnd()
       return;
     }
 
+    // During replay playback, begin per-frame game state capture
+    if (Movie::IsPlayingInput() && !GameStateCapture::IsCapturing())
+    {
+      GameStateCapture::BeginCapture();
+    }
+
     // standard grudge match/cup match replay
     if (!StateAuxillary::getBoolMatchStart() && !Movie::IsPlayingInput() &&
         !Movie::IsRecordingInput() && !StateAuxillary::isSpectator() &&
@@ -485,6 +499,13 @@ void OnFrameEnd()
       StateAuxillary::setOverwriteHomeCaptainPositionTrainingMode(false);
       StateAuxillary::setCustomTrainingModeStart(false);
       return;
+    }
+
+    // During replay playback, end per-frame game state capture and write to disk
+    if (GameStateCapture::IsCapturing())
+    {
+      std::string output_path = File::GetUserPath(D_CITRUSREPLAYS_IDX) + "output.citframes";
+      GameStateCapture::EndCapture(output_path);
     }
 
     if (!StateAuxillary::getBoolMatchEnd() && !Movie::IsPlayingInput())

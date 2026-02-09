@@ -473,6 +473,8 @@ add_library(core
   PowerPC/SignatureDB/SignatureDB.h
   State.cpp
   State.h
+  StrikersPadHook.cpp
+  StrikersPadHook.h
   SyncIdentifier.h
   SysConf.cpp
   SysConf.h

@@ -12,6 +12,7 @@
 #include "Common/Swap.h"
 #include "Core/Config/MainSettings.h"
 #include "Core/CoreTiming.h"
+#include "Core/GameStateFrame.h"
 #include "Core/HW/GCPad.h"
 #include "Core/HW/ProcessorInterface.h"
 #include "Core/HW/SI/SI_Device.h"
@@ -129,11 +130,23 @@ void CSIDevice_GCController::HandleMoviePadStatus(int device_number, GCPadStatus
   {
     Movie::PlayController(pad_status, device_number);
     Movie::InputUpdate();
+
+    // Notify GameStateCapture AFTER InputUpdate() so it uses the correct (incremented) input count
+    if (GameStateCapture::IsCapturing())
+    {
+      GameStateCapture::OnControllerInput(device_number, *pad_status, Movie::GetCurrentInputCount());
+    }
   }
   else if (Movie::IsRecordingInput())
   {
     Movie::RecordInput(pad_status, device_number);
     Movie::InputUpdate();
+
+    // Also capture inputs during recording for CITF generation
+    if (GameStateCapture::IsCapturing())
+    {
+      GameStateCapture::OnControllerInput(device_number, *pad_status, Movie::GetCurrentInputCount());
+    }
   }
   else
   {

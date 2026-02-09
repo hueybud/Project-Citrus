@@ -33,19 +33,56 @@ public:
   static std::string getCitrusGameId();
   static u64 getCitrusGameIdAsInt();
 
-  /*
-  Game Derived Locations (we do not mark these as variables because we do not directly use them here, just in gecko codes)
-
-  80312adc - ball x position
-  80312ae0 - ball y position
-  80312ae4 - ball z position
-
-  80311010 - ball x velocity
-  80311014 - ball y velocity
-  80311018 - ball z velocity
-  */ 
-
   // CONSTANTS
+
+  // Ball position (float)
+  static const u32 addressBallXPos = 0x80312adc;
+  static const u32 addressBallYPos = 0x80312ae0;
+  static const u32 addressBallZPos = 0x80312ae4;
+
+  // Ball velocity (float)
+  static const u32 addressBallXVel = 0x80311010;
+  static const u32 addressBallYVel = 0x80311014;
+  static const u32 addressBallZVel = 0x80311018;
+
+  // Controller input base (8 bytes per port: buttons, sticks, triggers)
+  static const u32 addressControllerInputBase = 0x8032C348;
+
+  // Ball object pointer (read to get ball pointer, then use offsets)
+  // ball_ptr + 0x24 -> u32 character pointer of who owns the ball
+  // ball_ptr + 0xa1 -> u8 perfect pass state (1 = perfect pass active)
+  static const u32 addressBallPointer = 0x80373664;
+
+  // Team pointers (cTeam objects)
+  static const u32 addressTeam1Pointer = 0x80371238;  // Left/team 1
+  static const u32 addressTeam2Pointer = 0x8037123C;  // Right/team 2
+  // Team inventory offsets from team pointer:
+  // +0x44 -> slot 0 (s32 type, u32 chargeCount, u8 isNew)
+  // +0x50 -> slot 1 (s32 type, u32 chargeCount, u8 isNew)
+
+  // Active powerup array (25 PowerupBase* pointers)
+  static const u32 addressActivePowerupArray = 0x802A76DC;
+  // PowerupBase struct offsets:
+  // +0x2C -> position (3x float XYZ)
+  // +0x44 -> velocity (3x float XYZ)
+  // +0x18 -> u32 powerup type (ePowerUpType enum)
+  // +0x6C -> u32 strength level (0/1/2)
+  // +0x64 -> u32 slot index
+  // +0x14 -> u32 thrower (player pointer)
+  // +0x1C -> u32 lifetime timer
+  // +0x10 -> u32 target team pointer
+  // +0x28 -> float speed multiplier
+  // +0x24 -> u16 random ID
+
+  // Goalie pointers (derived from addressCharacterPointersBase)
+  static const u32 addressLeftGoaliePointer = 0x8030d530;   // base + 0x20
+  static const u32 addressRightGoaliePointer = 0x8030d534;  // base + 0x24
+
+  // Character effect type pointers (compare against u32 at char_ptr + 0x11C)
+  static const u32 addressEffectFrozen = 0x802af514;
+  static const u32 addressEffectOnFire = 0x802af520;
+  static const u32 addressEffectStar = 0x802af52c;
+  static const u32 addressEffectElectrocuted = 0x802af538;
 
   static const u32 addressControllerPort1 = 0x81536A04;
   static const u32 addressControllerPort2 = 0x81536A06;

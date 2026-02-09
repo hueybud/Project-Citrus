@@ -45,3 +45,7 @@ CMakeLists.txt.user
 /Source/Core/DolphinQt/output.json
 *.lnk
 /Source/Core/DolphinQt/log.txt
+/docs/Citrus/
+/.claude/
+/CLAUDE.md
+/nul
