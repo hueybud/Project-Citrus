@@ -128,6 +128,16 @@ static u32 s_DSPcoefHash = 0;
 static bool s_bRecordingFromSaveState = false;
 static bool s_bPolled = false;
 
+// CITF playback support - use frame-level inputs from .citframes file instead of DTM
+struct CITFFrameInputs
+{
+  u32 movieFrameNumber;                     // DTM input index this frame corresponds to
+  std::array<GCPadStatus, 4> controllers;   // All 4 controller inputs for this frame
+};
+static std::vector<CITFFrameInputs> s_citf_inputs;  // CITF frames (indexed by capture order, not movieFrameNumber)
+static bool s_use_citf_inputs = false;               // True if playing back from CITF instead of DTM
+static std::string s_citf_file_path;                 // Path to .citframes file if found
+
 // s_InputDisplay is used by both CPU and GPU (is mutable).
 static std::mutex s_input_display_lock;
 static std::string s_InputDisplay[8];
@@ -377,6 +387,34 @@ u64 GetTotalFrames()
 u64 GetCurrentInputCount()
 {
   return s_currentInputCount;
+}
+
+const GCPadStatus* GetCITFInput(int controller, u64 inputCount)
+{
+  if (!s_use_citf_inputs || s_citf_inputs.empty())
+    return nullptr;
+
+  if (controller < 0 || controller >= 4)
+    return nullptr;
+
+  // Find the FIRST CITF frame with matching movieFrameNumber
+  // NOTE: We may have DUPLICATE movieFrameNumbers because PadStatus::Update is called
+  // twice per frame (fixed + variable timestep). We need to consistently use the FIRST one.
+  auto it = std::lower_bound(
+      s_citf_inputs.begin(), s_citf_inputs.end(), inputCount,
+      [](const CITFFrameInputs& frame, u64 target_input_count) {
+        return frame.movieFrameNumber < target_input_count;
+      });
+
+  // lower_bound returns the first element >= inputCount
+  // Check if we found an exact match
+  if (it != s_citf_inputs.end() && it->movieFrameNumber == inputCount)
+  {
+    // Found a match! lower_bound guarantees this is the FIRST frame with this movieFrameNumber
+    return &it->controllers[controller];
+  }
+
+  return nullptr;  // No matching frame found
 }
 
 u64 GetTotalInputCount()
@@ -1039,6 +1077,170 @@ void ReadHeader()
 #define dir_delimter '/'
 #define MAX_FILENAME 512
 #define READ_SIZE 8192
+
+// Load CITF file and extract controller inputs for playback
+static bool LoadCITFInputs(const std::string& citf_path)
+{
+  File::IOFile file(citf_path, "rb");
+  if (!file)
+  {
+    WARN_LOG_FMT(CORE, "Failed to open CITF file: {}", citf_path);
+    return false;
+  }
+
+  // Read CITF header (24 bytes)
+  struct CITFHeader
+  {
+    char magic[4];       // "CITF"
+    u32 version;         // 4
+    u32 frameCount;
+    u32 fixedFrameSize;  // Size of fixed portion per frame
+    u8 leftCaptainID;
+    u8 rightCaptainID;
+    u8 leftSidekickID;
+    u8 rightSidekickID;
+    u8 stadiumID;
+    u8 headerPadding[3];
+  };
+
+  CITFHeader header;
+  if (!file.ReadBytes(&header, sizeof(header)))
+  {
+    ERROR_LOG_FMT(CORE, "Failed to read CITF header");
+    return false;
+  }
+
+  // Verify magic
+  if (std::memcmp(header.magic, "CITF", 4) != 0)
+  {
+    ERROR_LOG_FMT(CORE, "Invalid CITF magic: {}{}{}{}", header.magic[0], header.magic[1],
+                  header.magic[2], header.magic[3]);
+    return false;
+  }
+
+  INFO_LOG_FMT(CORE, "Loading CITF inputs: {} frames, fixedFrameSize={}", header.frameCount,
+               header.fixedFrameSize);
+
+  // Allocate buffer for frame inputs
+  s_citf_inputs.resize(header.frameCount);
+
+  // Frame structure offsets:
+  // gameTime(4) + movieFrameNumber(4) + score(4) + ball(32) + characters(240) = 284 bytes
+  // Then controller data starts
+  const size_t movie_frame_number_offset = 4;    // After gameTime
+  const size_t controller_offset = 284;
+  const size_t item_count_offset = 356;  // Offset to itemCount field (before items array)
+
+  // Track actual file offset (frames have variable size due to items)
+  u64 current_file_offset = sizeof(CITFHeader);
+
+  // Read each frame's movieFrameNumber and controller inputs
+  for (u32 frame_idx = 0; frame_idx < header.frameCount; frame_idx++)
+  {
+    // Seek to this frame's start
+    file.Seek(current_file_offset, File::SeekOrigin::Begin);
+
+    // Skip gameTime(4 bytes) to reach movieFrameNumber
+    file.Seek(movie_frame_number_offset, File::SeekOrigin::Current);
+
+    // Read movieFrameNumber (u32)
+    u32 movie_frame_number;
+    if (!file.ReadBytes(&movie_frame_number, sizeof(movie_frame_number)))
+    {
+      ERROR_LOG_FMT(CORE, "Failed to read movieFrameNumber at frame {}", frame_idx);
+      return false;
+    }
+    s_citf_inputs[frame_idx].movieFrameNumber = movie_frame_number;
+
+    // Seek to controller data (from start of frame)
+    file.Seek(current_file_offset + controller_offset, File::SeekOrigin::Begin);
+
+    // Read all 4 controllers for this frame
+    for (int port = 0; port < 4; port++)
+    {
+      // FrameControllerInput structure: buttons(2) + stickX(1) + stickY(1) + substickX(1) +
+      //                                  substickY(1) + triggerLeft(1) + triggerRight(1) +
+      //                                  isConnected(1) + padding(1) = 10 bytes
+      struct CITFControllerInput
+      {
+        u16 buttons;
+        u8 stickX;
+        u8 stickY;
+        u8 substickX;
+        u8 substickY;
+        u8 triggerLeft;
+        u8 triggerRight;
+        u8 isConnected;
+        u8 padding;
+      };
+
+      CITFControllerInput citf_input;
+      if (!file.ReadBytes(&citf_input, sizeof(citf_input)))
+      {
+        ERROR_LOG_FMT(CORE, "Failed to read controller input at frame {}, port {}", frame_idx, port);
+        return false;
+      }
+
+      // Convert to GCPadStatus
+      GCPadStatus& pad = s_citf_inputs[frame_idx].controllers[port];
+      pad.button = citf_input.buttons;
+      pad.stickX = citf_input.stickX;
+      pad.stickY = citf_input.stickY;
+      pad.substickX = citf_input.substickX;
+      pad.substickY = citf_input.substickY;
+      pad.triggerLeft = citf_input.triggerLeft;
+      pad.triggerRight = citf_input.triggerRight;
+      pad.isConnected = (citf_input.isConnected != 0);
+
+      // Set analog button values based on digital button state
+      pad.analogA = (citf_input.buttons & 0x0100) ? 0xFF : 0;  // PAD_BUTTON_A
+      pad.analogB = (citf_input.buttons & 0x0200) ? 0xFF : 0;  // PAD_BUTTON_B
+    }
+
+    // Update file offset for next frame (frames have variable size due to items)
+    // Read itemCount to determine this frame's actual size
+    file.Seek(current_file_offset + item_count_offset, File::SeekOrigin::Begin);
+    u8 item_count;
+    if (!file.ReadBytes(&item_count, sizeof(item_count)))
+    {
+      ERROR_LOG_FMT(CORE, "Failed to read itemCount at frame {}", frame_idx);
+      return false;
+    }
+
+    // Calculate this frame's total size: fixed portion + variable items
+    u64 frame_total_size = header.fixedFrameSize + (item_count * 48);  // sizeof(FrameItem) = 48
+    current_file_offset += frame_total_size;
+  }
+
+  INFO_LOG_FMT(CORE, "Successfully loaded {} frames of CITF inputs from {}", header.frameCount,
+               citf_path);
+
+  // Debug: Log first few frame's movieFrameNumbers to verify alignment
+  INFO_LOG_FMT(CORE, "CITF movieFrameNumber progression (first 10 frames):");
+  u32 prev_movie_frame = 0;
+  bool is_sorted = true;
+  for (u32 i = 0; i < std::min(10u, header.frameCount); i++)
+  {
+    u32 curr_movie_frame = s_citf_inputs[i].movieFrameNumber;
+    INFO_LOG_FMT(CORE, "  CITF frame {} -> movieFrameNumber={}", i, curr_movie_frame);
+
+    if (i > 0 && curr_movie_frame <= prev_movie_frame)
+    {
+      ERROR_LOG_FMT(CORE, "  WARNING: movieFrameNumber not increasing! {} <= {}",
+                    curr_movie_frame, prev_movie_frame);
+      is_sorted = false;
+    }
+    prev_movie_frame = curr_movie_frame;
+  }
+
+  if (!is_sorted)
+  {
+    ERROR_LOG_FMT(CORE, "CITF movieFrameNumbers are not sorted! Playback may be incorrect.");
+  }
+
+  return true;
+}
+
 // NOTE: Host Thread
 bool PlayInput(const std::string& movie_path, std::optional<std::string>* savestate_path)
 {
@@ -1129,6 +1331,11 @@ bool PlayInput(const std::string& movie_path, std::optional<std::string>* savest
           INFO_LOG_FMT(CORE, "We found a savestate in the CIT");
           boolFoundOutputSav = true;
         }
+        if (foundDTMFile.extension() == ".citframes")
+        {
+          INFO_LOG_FMT(CORE, "We found a CITF file in the CIT: {}", extractHere);
+          s_citf_file_path = extractHere;
+        }
         if (unzOpenCurrentFile(zipfile) != UNZ_OK)
         {
           printf("could not open file\n");
@@ -1179,6 +1386,23 @@ bool PlayInput(const std::string& movie_path, std::optional<std::string>* savest
     }
 
     unzClose(zipfile);
+
+    // Check if a CITF file was found and load it for input playback
+    if (!s_citf_file_path.empty())
+    {
+      INFO_LOG_FMT(CORE, "Attempting to load CITF inputs from: {}", s_citf_file_path);
+      if (LoadCITFInputs(s_citf_file_path))
+      {
+        s_use_citf_inputs = true;
+        INFO_LOG_FMT(CORE, "CITF playback mode enabled - using frame-level inputs via SI layer");
+      }
+      else
+      {
+        WARN_LOG_FMT(CORE, "Failed to load CITF inputs, falling back to DTM inputs");
+        s_use_citf_inputs = false;
+        s_citf_inputs.clear();
+      }
+    }
 
     if (!boolFoundOutputSav)
     {
@@ -1456,7 +1680,82 @@ void PlayController(GCPadStatus* PadStatus, int controllerID)
 {
   // Correct playback is entirely dependent on the emulator polling the controllers
   // in the same order done during recording
-  if (!IsPlayingInput() || !IsUsingPad(controllerID) || s_temp_input.empty())
+  if (!IsPlayingInput() || !IsUsingPad(controllerID))
+    return;
+
+  // CITF Playback Mode: Use frame-level inputs from CITF file instead of DTM
+  // Feeds through SI layer (same as DTM) — no game memory injection needed
+  if (s_use_citf_inputs && !s_citf_inputs.empty())
+  {
+    // Find the CITF frame with the largest movieFrameNumber <= s_currentInputCount
+    // This handles the 2:1 SI poll mapping (two SI polls per game frame):
+    //   CITF movieFrameNumbers: 2, 4, 6, ...
+    //   SI inputCounts:         2, 3, 4, 5, 6, 7, ...
+    //   inputCount=2 -> CITF frame 2, inputCount=3 -> CITF frame 2 (reused)
+    auto it = std::upper_bound(
+        s_citf_inputs.begin(), s_citf_inputs.end(), s_currentInputCount,
+        [](u64 target, const CITFFrameInputs& frame) {
+          return target < frame.movieFrameNumber;
+        });
+
+    // upper_bound gives first element > target; we want the one before it
+    const CITFFrameInputs* matching_frame =
+        (it != s_citf_inputs.begin()) ? &*(it - 1) : nullptr;
+
+    if (matching_frame == nullptr)
+    {
+      // No CITF frame available yet for this input count
+      // This can happen during the initial frames before CITF capture started
+      static int no_frame_warning_count = 0;
+      if (no_frame_warning_count < 10)
+      {
+        WARN_LOG_FMT(CORE, "No CITF frame available for inputCount={} frame={} (first CITF movieFrameNumber={}), using default input",
+                     s_currentInputCount, s_currentFrame,
+                     s_citf_inputs.empty() ? 0 : s_citf_inputs[0].movieFrameNumber);
+        no_frame_warning_count++;
+      }
+
+      // Use a neutral input (centered stick, no buttons)
+      std::memset(PadStatus, 0, sizeof(GCPadStatus));
+      PadStatus->stickX = 128;
+      PadStatus->stickY = 128;
+      PadStatus->substickX = 128;
+      PadStatus->substickY = 128;
+
+      s_last_pad_status[controllerID] = *PadStatus;
+      s_currentByte += sizeof(ControllerState);
+      return;
+    }
+
+    // Use the matching frame's input — feed directly through SI layer
+    // (no game memory injection needed; SI register emulation delivers this to the game)
+    const GCPadStatus& citf_pad = matching_frame->controllers[controllerID];
+    *PadStatus = citf_pad;
+
+    // Cache for GetLastPadStatus()
+    s_last_pad_status[controllerID] = *PadStatus;
+
+    // Increment byte counter to keep DTM system happy
+    s_currentByte += sizeof(ControllerState);
+
+    // Debug logging
+    static int citf_debug_count = 0;
+    if (citf_debug_count < 20 && controllerID == 0)
+    {
+      INFO_LOG_FMT(CORE,
+                   "[CITF PLAY] inputCount={} frame={} citfMovieFrame={} btn=0x{:04X} stick=({},{}) cstick=({},{}) L={} R={}",
+                   s_currentInputCount, s_currentFrame, matching_frame->movieFrameNumber,
+                   PadStatus->button, PadStatus->stickX, PadStatus->stickY,
+                   PadStatus->substickX, PadStatus->substickY,
+                   PadStatus->triggerLeft, PadStatus->triggerRight);
+      citf_debug_count++;
+    }
+
+    return;
+  }
+
+  // Standard DTM Playback Mode: Use SI poll-level inputs from DTM file
+  if (s_temp_input.empty())
     return;
 
   if (s_currentByte + sizeof(ControllerState) > s_temp_input.size())
@@ -1534,12 +1833,12 @@ void PlayController(GCPadStatus* PadStatus, int controllerID)
   if (s_padState.reset)
     ProcessorInterface::ResetButton_Tap();
 
-  // Debug logging for CITF capture
+  // Debug logging for DTM playback tracing
   static int play_debug = 0;
-  if (controllerID == 0 && play_debug < 3)
+  if (controllerID == 0 && play_debug < 100)
   {
-    INFO_LOG_FMT(CORE, "PlayController Frame {} Controller {}: button=0x{:04X} stick=({},{}) cstick=({},{}) L={} R={}",
-                 play_debug, controllerID, PadStatus->button,
+    INFO_LOG_FMT(CORE, "PlayController [DTM READ {}] inputCount={} Controller {}: button=0x{:04X} stick=({},{}) cstick=({},{}) L={} R={}",
+                 play_debug, s_currentInputCount, controllerID, PadStatus->button,
                  PadStatus->stickX, PadStatus->stickY,
                  PadStatus->substickX, PadStatus->substickY,
                  PadStatus->triggerLeft, PadStatus->triggerRight);
@@ -1622,6 +1921,16 @@ void EndPlayInput(bool cont)
       CPU::Break();
     s_rerecords = 0;
     s_currentByte = 0;
+
+    // Clean up CITF playback state
+    if (s_use_citf_inputs)
+    {
+      INFO_LOG_FMT(CORE, "CITF playback ended, cleaning up");
+      s_use_citf_inputs = false;
+      s_citf_inputs.clear();
+      s_citf_file_path.clear();
+    }
+
     if (s_playMode == PlayMode::Playing)
     {
       StateAuxillary::setPostPort();
@@ -1933,6 +2242,11 @@ void Shutdown()
 {
   s_currentInputCount = s_totalInputCount = s_totalFrames = s_tickCountAtLastInput = 0;
   s_temp_input.clear();
+
+  // Clean up CITF playback state
+  s_use_citf_inputs = false;
+  s_citf_inputs.clear();
+  s_citf_file_path.clear();
 
   // shutdown is called any time the game (core) is closed
   // delete any residue from shutting down a playback early that wasn't handled from graceful movie end

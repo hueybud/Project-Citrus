@@ -158,6 +158,9 @@ u64 GetTotalInputCount();
 u64 GetCurrentLagCount();
 u64 GetTotalLagCount();
 
+// Get CITF frame data for a specific inputCount (returns nullptr if not found)
+const GCPadStatus* GetCITFInput(int controller, u64 inputCount);
+
 void SetClearSave(bool enabled);
 void SignalDiscChange(const std::string& new_path);
 void SetReset(bool reset);

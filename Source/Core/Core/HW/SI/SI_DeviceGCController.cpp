@@ -129,24 +129,26 @@ void CSIDevice_GCController::HandleMoviePadStatus(int device_number, GCPadStatus
   else if (Movie::IsPlayingInput())
   {
     Movie::PlayController(pad_status, device_number);
-    Movie::InputUpdate();
 
-    // Notify GameStateCapture AFTER InputUpdate() so it uses the correct (incremented) input count
+    // Capture BEFORE InputUpdate so inputCount matches the DTM input index that produced these values
     if (GameStateCapture::IsCapturing())
     {
       GameStateCapture::OnControllerInput(device_number, *pad_status, Movie::GetCurrentInputCount());
     }
+
+    Movie::InputUpdate();
   }
   else if (Movie::IsRecordingInput())
   {
     Movie::RecordInput(pad_status, device_number);
-    Movie::InputUpdate();
 
-    // Also capture inputs during recording for CITF generation
+    // Capture BEFORE InputUpdate so inputCount matches the DTM input index
     if (GameStateCapture::IsCapturing())
     {
       GameStateCapture::OnControllerInput(device_number, *pad_status, Movie::GetCurrentInputCount());
     }
+
+    Movie::InputUpdate();
   }
   else
   {

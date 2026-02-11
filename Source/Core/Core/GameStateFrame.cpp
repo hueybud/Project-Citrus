@@ -9,13 +9,11 @@
 #include "Common/IOFile.h"
 #include "Common/Logging/Log.h"
 
-#include "Core/HLE/HLE.h"
 #include "Core/HW/AddressSpace.h"
 #include "Core/HW/GCPad.h"
 #include "Core/HW/Memmap.h"
 #include "Core/Metadata.h"
 #include "Core/Movie.h"
-#include "Core/StrikersPadHook.h"
 #include "InputCommon/GCPadStatus.h"
 
 // Static state
@@ -48,12 +46,6 @@ void GameStateCapture::BeginCapture()
 
   s_capturing = true;
 
-  // Initialize and install HLE hook for Strikers controller reading at 0x801c3808
-  // This captures inputs at the exact moment the game reads them
-  StrikersPadHook::Initialize();
-  HLE::Patch(0x801c3808, "StrikersPadRead");
-  INFO_LOG_FMT(CORE, "GameStateCapture: Installed StrikersPadRead HLE hook at 0x801c3808");
-
   INFO_LOG_FMT(CORE, "GameStateCapture: Begin capture at Movie frame {}", Movie::GetCurrentFrame());
 }
 
@@ -85,8 +77,10 @@ void GameStateCapture::CaptureFrame()
 
   // Frame metadata (frameIndex is implicit from position in file)
   frame.gameTime = accessors->ReadF32(Metadata::addressTimeElapsed);
-  // Use input count from when controller 0 was last read (buffered from PlayController)
-  frame.movieFrameNumber = s_buffered_inputs[0].valid ? static_cast<u32>(s_buffered_inputs[0].inputCount) : 0;
+  // Use input count from SI callback (captured at PlayController time, always correct)
+  frame.movieFrameNumber = s_buffered_inputs[0].valid
+                               ? static_cast<u32>(s_buffered_inputs[0].inputCount)
+                               : 0;
 
   // Score
   frame.leftScore = static_cast<u8>(Memory::Read_U16(Metadata::addressLeftSideScore));
@@ -261,43 +255,40 @@ void GameStateCapture::ReadCharacterState(GameStateFrame& frame)
 
 void GameStateCapture::ReadControllerInputs(GameStateFrame& frame)
 {
-  // Read controller inputs from buffered data captured immediately when Movie::PlayController() read them
-  // This ensures perfect timing - we get the exact inputs that were used for this frame
-  // All values are in standard u8 format (0-255, centered at 128)
+  // Read controller inputs from SI callback buffer (s_buffered_inputs)
+  // These are the EXACT values from Movie::PlayController / RecordInput,
+  // captured at the SI device layer with no timing ambiguity.
   for (int port = 0; port < GameStateFrame::CONTROLLER_COUNT; port++)
   {
-    if (s_buffered_inputs[port].valid)
+    if (!s_buffered_inputs[port].valid)
     {
-      const GCPadStatus& pad = s_buffered_inputs[port].pad;
-
-      // Copy all fields from buffered GCPadStatus to our frame structure
-      frame.controllers[port].buttons = pad.button;
-      frame.controllers[port].stickX = pad.stickX;
-      frame.controllers[port].stickY = pad.stickY;
-      frame.controllers[port].substickX = pad.substickX;
-      frame.controllers[port].substickY = pad.substickY;
-      frame.controllers[port].triggerLeft = pad.triggerLeft;
-      frame.controllers[port].triggerRight = pad.triggerRight;
-      frame.controllers[port].isConnected = pad.isConnected ? 1 : 0;
-    }
-    else
-    {
-      // No input buffered for this port - zero it out
-      std::memset(&frame.controllers[port], 0, sizeof(FrameControllerInput));
+      frame.controllers[port] = {};
+      continue;
     }
 
-    // Debug logging
-    static int debug_frame = 0;
-    if (port == 0 && debug_frame < 3)
-    {
-      INFO_LOG_FMT(CORE, "CITF Frame {} (DTM Frame {}) Port {}: button=0x{:04X} stick=({},{}) cstick=({},{}) L={} R={} connected={}",
-                   debug_frame, frame.movieFrameNumber, port, frame.controllers[port].buttons,
-                   frame.controllers[port].stickX, frame.controllers[port].stickY,
-                   frame.controllers[port].substickX, frame.controllers[port].substickY,
-                   frame.controllers[port].triggerLeft, frame.controllers[port].triggerRight,
-                   frame.controllers[port].isConnected);
-      debug_frame++;
-    }
+    const GCPadStatus& pad = s_buffered_inputs[port].pad;
+    frame.controllers[port].buttons = pad.button;
+    frame.controllers[port].stickX = pad.stickX;
+    frame.controllers[port].stickY = pad.stickY;
+    frame.controllers[port].substickX = pad.substickX;
+    frame.controllers[port].substickY = pad.substickY;
+    frame.controllers[port].triggerLeft = pad.triggerLeft;
+    frame.controllers[port].triggerRight = pad.triggerRight;
+    frame.controllers[port].isConnected = pad.isConnected ? 1 : 0;
+  }
+
+  // Debug logging
+  static int debug_frame = 0;
+  if (debug_frame < 3)
+  {
+    INFO_LOG_FMT(CORE, "CITF Frame {} (inputCount {}) Port 0: button=0x{:04X} stick=({},{}) cstick=({},{}) L={} R={} connected={}",
+                 debug_frame, frame.movieFrameNumber,
+                 frame.controllers[0].buttons,
+                 frame.controllers[0].stickX, frame.controllers[0].stickY,
+                 frame.controllers[0].substickX, frame.controllers[0].substickY,
+                 frame.controllers[0].triggerLeft, frame.controllers[0].triggerRight,
+                 frame.controllers[0].isConnected);
+    debug_frame++;
   }
 }
 
@@ -404,7 +395,6 @@ void GameStateCapture::EndCapture(const std::string& output_path)
   if (s_frame_buffer.empty())
   {
     INFO_LOG_FMT(CORE, "GameStateCapture: No frames captured, skipping file write");
-    StrikersPadHook::Shutdown();
     return;
   }
 
@@ -413,7 +403,6 @@ void GameStateCapture::EndCapture(const std::string& output_path)
   {
     ERROR_LOG_FMT(CORE, "GameStateCapture: Failed to open output file: {}", output_path);
     s_frame_buffer.clear();
-    StrikersPadHook::Shutdown();
     return;
   }
 
@@ -454,5 +443,4 @@ void GameStateCapture::EndCapture(const std::string& output_path)
                total_bytes, output_path);
 
   s_frame_buffer.clear();
-  StrikersPadHook::Shutdown();
 }
