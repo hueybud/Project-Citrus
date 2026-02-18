@@ -1132,12 +1132,15 @@ static bool LoadCITFInputs(const std::string& citf_path)
   s_citf_inputs.resize(header.frameCount);
 
   // Frame structure offsets (computed from fixedFrameSize to support version changes):
-  // itemCount is always the last 4 bytes of the fixed portion (u8 + 3 padding)
-  // controller inputs (4 x 10 = 40 bytes) + inventory (4 x 8 = 32 bytes) precede itemCount
-  // So controllers start at fixedFrameSize - 4 - 32 - 40
-  const size_t movie_frame_number_offset = 4;    // After gameTime (stable across versions)
+  // itemCount is always the last 4 bytes of the fixed portion (u8 + 3 padding).
+  // Working backwards from itemCount:
+  //   v8+ FrameTeamStats block: leftStats(10) + rightStats(10) + statsPadding(4) = 24 bytes
+  //   inventory: 4 slots x 8 bytes = 32 bytes
+  //   controllers: 4 ports x 10 bytes = 40 bytes
+  const size_t movie_frame_number_offset = 4;  // After gameTime (stable across versions)
   const size_t item_count_offset = header.fixedFrameSize - 4;
-  const size_t controller_offset = item_count_offset - 32 - 40;  // Before inventory and itemCount
+  const size_t team_stats_size = (header.version >= 8) ? 24 : 0;  // Added in v8
+  const size_t controller_offset = item_count_offset - team_stats_size - 32 - 40;
 
   // Track actual file offset (frames have variable size due to items)
   u64 current_file_offset = sizeof(CITFHeader);

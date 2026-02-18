@@ -46,4 +46,6 @@ private:
   QSlider* m_mem2_override_slider;
   QLabel* m_mem2_override_slider_label;
   QLabel* m_ram_override_description;
+
+  QCheckBox* m_movie_use_null_backend_checkbox;
 };

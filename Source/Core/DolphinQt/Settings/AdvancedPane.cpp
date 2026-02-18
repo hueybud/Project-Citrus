@@ -170,6 +170,17 @@ void AdvancedPane::CreateLayout()
   custom_rtc_description->setWordWrap(true);
   rtc_options->layout()->addWidget(custom_rtc_description);
 
+  auto* movie_options = new QGroupBox(tr("Movie Playback"));
+  auto* movie_options_layout = new QVBoxLayout();
+  movie_options->setLayout(movie_options_layout);
+  main_layout->addWidget(movie_options);
+
+  m_movie_use_null_backend_checkbox = new QCheckBox(tr("Use Null Graphics Backend During Playback"));
+  m_movie_use_null_backend_checkbox->setToolTip(
+      tr("Forces the Null graphics backend when playing back a movie, ignoring the backend stored "
+         "in the recording. Useful for headless batch replay (e.g. CIT to CITF conversion)."));
+  movie_options_layout->addWidget(m_movie_use_null_backend_checkbox);
+
   main_layout->addStretch(1);
 }
 
@@ -228,6 +239,11 @@ void AdvancedPane::ConnectLayout()
     Config::SetBaseOrCurrent(Config::MAIN_CUSTOM_RTC_VALUE,
                              static_cast<u32>(date_time.toSecsSinceEpoch()));
     Update();
+  });
+
+  m_movie_use_null_backend_checkbox->setChecked(Config::Get(Config::MAIN_MOVIE_USE_NULL_BACKEND));
+  connect(m_movie_use_null_backend_checkbox, &QCheckBox::toggled, [](bool checked) {
+    Config::SetBaseOrCurrent(Config::MAIN_MOVIE_USE_NULL_BACKEND, checked);
   });
 }
 
@@ -306,4 +322,6 @@ void AdvancedPane::Update()
 
   m_custom_rtc_checkbox->setEnabled(!running);
   m_custom_rtc_datetime->setEnabled(enable_custom_rtc_widgets);
+
+  m_movie_use_null_backend_checkbox->setChecked(Config::Get(Config::MAIN_MOVIE_USE_NULL_BACKEND));
 }

@@ -13,7 +13,7 @@ struct GCPadStatus;
 struct CaptureHeader
 {
   char magic[4];          // "CITF"
-  u32 version;            // 8
+  u32 version;            // 10
   u32 frameCount;
   u32 fixedFrameSize;     // size of fixed portion per frame (excludes variable items)
 
