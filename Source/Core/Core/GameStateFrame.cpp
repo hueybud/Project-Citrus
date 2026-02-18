@@ -30,7 +30,7 @@ struct BufferedInput
 static std::array<BufferedInput, 4> s_buffered_inputs{};
 
 // Binary file format constants
-static constexpr u32 CITF_VERSION = 4;
+static constexpr u32 CITF_VERSION = 10;
 
 void GameStateCapture::BeginCapture()
 {
@@ -87,11 +87,27 @@ void GameStateCapture::CaptureFrame()
   frame.rightScore = static_cast<u8>(Memory::Read_U16(Metadata::addressRightSideScore));
   frame.isPaused = Memory::Read_U8(Metadata::addressIsGamePaused);
 
+  // Game phase and potential scorer from cGame singleton
+  constexpr u32 cGameSingletonPtr = 0x80373708;
+  u32 cGamePtr = Memory::Read_U32(cGameSingletonPtr);
+  if (cGamePtr != 0)
+  {
+    // eGameState enum at cGame+0x24: 0=pre-match, 1=kickoff, 2=goal celebration, 3=transition,
+    // 4=active play, 5=active play variant
+    frame.gamePhase = static_cast<u8>(Memory::Read_U32(cGamePtr + 0x24));
+
+    // Potential scorer at cGame+0x2C: set on ball pickup (cBall::SetOwner) and on shot fire
+    // (zz_80020164_ for action states 0x05/0x08/0x11). Persists through ball-in-flight, so
+    // perfect-pass goals correctly credit the shooter rather than showing owner=NONE.
+    frame.potentialScorerPtr = Memory::Read_U32(cGamePtr + 0x2C);
+  }
+
   // Ball, characters, controllers, powerup inventory, items
   ReadBallState(frame);
   ReadCharacterState(frame);
   ReadControllerInputs(frame);
   ReadPowerupInventory(frame);
+  ReadTeamStats(frame);
   ReadItems(frame);
 
   s_frame_buffer.push_back(frame);
@@ -107,18 +123,23 @@ void GameStateCapture::ReadBallState(GameStateFrame& frame)
   frame.ballPosY = accessors->ReadF32(Metadata::addressBallYPos);
   frame.ballPosZ = accessors->ReadF32(Metadata::addressBallZPos);
 
-  // Ball velocity
-  frame.ballVelX = accessors->ReadF32(Metadata::addressBallXVel);
-  frame.ballVelY = accessors->ReadF32(Metadata::addressBallYVel);
-  frame.ballVelZ = accessors->ReadF32(Metadata::addressBallZVel);
-
-  // Ball ownership and perfect pass state
+  // Ball velocity, ownership, and perfect pass state — all from the cBall object.
+  // cBall::SetVelocity writes to ball_ptr+0x58/5C/60 and PostPhysicsUpdate refreshes them
+  // each frame from the physics engine. Static address mirrors lag 1-2 frames behind.
   u32 ball_ptr = Memory::Read_U32(Metadata::addressBallPointer);
   if (ball_ptr != 0)
   {
+    frame.ballVelX = accessors->ReadF32(ball_ptr + 0x58);
+    frame.ballVelY = accessors->ReadF32(ball_ptr + 0x5C);
+    frame.ballVelZ = accessors->ReadF32(ball_ptr + 0x60);
     frame.ballOwnerCharacterPointer = Memory::Read_U32(ball_ptr + 0x24);
+    frame.ballPassTargetPointer = Memory::Read_U32(ball_ptr + 0x30);
     frame.isPerfectPass = Memory::Read_U8(ball_ptr + 0xa1);
   }
+
+  // Ball charge level (shared by both teams)
+  frame.ballChargeAmount =
+      static_cast<float>(Memory::Read_U32(Metadata::addressChargedBallAmount));
 }
 
 void GameStateCapture::ReadCharacterState(GameStateFrame& frame)
@@ -130,10 +151,14 @@ void GameStateCapture::ReadCharacterState(GameStateFrame& frame)
   for (int i = 0; i < 4; i++)
   {
     u32 char_ptr = Memory::Read_U32(Metadata::addressCharacterPointersBase + (i * 4));
+    frame.characterPointers[i] = char_ptr;
     if (char_ptr != 0)
     {
-      frame.characters[i].posX = accessors->ReadF32(char_ptr + 0x520);
-      frame.characters[i].posY = accessors->ReadF32(char_ptr + 0x524);
+      // Base entity position: +0x18=X, +0x1c=Y, +0x20=Z (used by game logic in SwapController,
+      // InControlOfBall, etc. — same coordinate system as ball)
+      frame.characters[i].posX = accessors->ReadF32(char_ptr + 0x18);
+      frame.characters[i].posY = accessors->ReadF32(char_ptr + 0x1c);
+      frame.characters[i].posZ = accessors->ReadF32(char_ptr + 0x20);
       frame.characters[i].actionState = Memory::Read_U32(char_ptr + 0x1d8);
       frame.characters[i].heading = Memory::Read_U16(char_ptr + 0x42);
 
@@ -155,16 +180,21 @@ void GameStateCapture::ReadCharacterState(GameStateFrame& frame)
       frame.characters[i].speedItemType = (speed_item_type == -1) ? 0 : static_cast<u8>(speed_item_type);
       frame.characters[i].speedItemCount = static_cast<u8>(Memory::Read_U32(char_ptr + 0x374));
       frame.characters[i].speedItemTimer = accessors->ReadF32(char_ptr + 0x36c);
+
+      // Human-controlled flag: ptr+0x1c0 is controller pointer (non-null = human)
+      frame.characters[i].isUserControlled = (Memory::Read_U32(char_ptr + 0x1c0) != 0) ? 1 : 0;
     }
   }
 
   // Left goalie (index 4)
   {
     u32 char_ptr = Memory::Read_U32(Metadata::addressLeftGoaliePointer);
+    frame.characterPointers[4] = char_ptr;
     if (char_ptr != 0)
     {
-      frame.characters[4].posX = accessors->ReadF32(char_ptr + 0x448);
-      frame.characters[4].posY = accessors->ReadF32(char_ptr + 0x44C);
+      frame.characters[4].posX = accessors->ReadF32(char_ptr + 0x18);
+      frame.characters[4].posY = accessors->ReadF32(char_ptr + 0x1c);
+      frame.characters[4].posZ = accessors->ReadF32(char_ptr + 0x20);
       frame.characters[4].actionState = Memory::Read_U32(char_ptr + 0x1d4);
       frame.characters[4].heading = Memory::Read_U16(char_ptr + 0x42);
 
@@ -186,6 +216,9 @@ void GameStateCapture::ReadCharacterState(GameStateFrame& frame)
       frame.characters[4].speedItemType = (speed_item_type == -1) ? 0 : static_cast<u8>(speed_item_type);
       frame.characters[4].speedItemCount = static_cast<u8>(Memory::Read_U32(char_ptr + 0x374));
       frame.characters[4].speedItemTimer = accessors->ReadF32(char_ptr + 0x36c);
+
+      // Human-controlled flag: ptr+0x1c0 is controller pointer (non-null = human)
+      frame.characters[4].isUserControlled = (Memory::Read_U32(char_ptr + 0x1c0) != 0) ? 1 : 0;
     }
   }
 
@@ -193,10 +226,12 @@ void GameStateCapture::ReadCharacterState(GameStateFrame& frame)
   for (int i = 0; i < 4; i++)
   {
     u32 char_ptr = Memory::Read_U32(Metadata::addressCharacterPointersBase + 0x10 + (i * 4));
+    frame.characterPointers[5 + i] = char_ptr;
     if (char_ptr != 0)
     {
-      frame.characters[5 + i].posX = accessors->ReadF32(char_ptr + 0x520);
-      frame.characters[5 + i].posY = accessors->ReadF32(char_ptr + 0x524);
+      frame.characters[5 + i].posX = accessors->ReadF32(char_ptr + 0x18);
+      frame.characters[5 + i].posY = accessors->ReadF32(char_ptr + 0x1c);
+      frame.characters[5 + i].posZ = accessors->ReadF32(char_ptr + 0x20);
       frame.characters[5 + i].actionState = Memory::Read_U32(char_ptr + 0x1d8);
       frame.characters[5 + i].heading = Memory::Read_U16(char_ptr + 0x42);
 
@@ -218,16 +253,21 @@ void GameStateCapture::ReadCharacterState(GameStateFrame& frame)
       frame.characters[5 + i].speedItemType = (speed_item_type == -1) ? 0 : static_cast<u8>(speed_item_type);
       frame.characters[5 + i].speedItemCount = static_cast<u8>(Memory::Read_U32(char_ptr + 0x374));
       frame.characters[5 + i].speedItemTimer = accessors->ReadF32(char_ptr + 0x36c);
+
+      // Human-controlled flag: ptr+0x1c0 is controller pointer (non-null = human)
+      frame.characters[5 + i].isUserControlled = (Memory::Read_U32(char_ptr + 0x1c0) != 0) ? 1 : 0;
     }
   }
 
   // Right goalie (index 9)
   {
     u32 char_ptr = Memory::Read_U32(Metadata::addressRightGoaliePointer);
+    frame.characterPointers[9] = char_ptr;
     if (char_ptr != 0)
     {
-      frame.characters[9].posX = accessors->ReadF32(char_ptr + 0x448);
-      frame.characters[9].posY = accessors->ReadF32(char_ptr + 0x44C);
+      frame.characters[9].posX = accessors->ReadF32(char_ptr + 0x18);
+      frame.characters[9].posY = accessors->ReadF32(char_ptr + 0x1c);
+      frame.characters[9].posZ = accessors->ReadF32(char_ptr + 0x20);
       frame.characters[9].actionState = Memory::Read_U32(char_ptr + 0x1d4);
       frame.characters[9].heading = Memory::Read_U16(char_ptr + 0x42);
 
@@ -249,6 +289,9 @@ void GameStateCapture::ReadCharacterState(GameStateFrame& frame)
       frame.characters[9].speedItemType = (speed_item_type == -1) ? 0 : static_cast<u8>(speed_item_type);
       frame.characters[9].speedItemCount = static_cast<u8>(Memory::Read_U32(char_ptr + 0x374));
       frame.characters[9].speedItemTimer = accessors->ReadF32(char_ptr + 0x36c);
+
+      // Human-controlled flag: ptr+0x1c0 is controller pointer (non-null = human)
+      frame.characters[9].isUserControlled = (Memory::Read_U32(char_ptr + 0x1c0) != 0) ? 1 : 0;
     }
   }
 }
@@ -327,6 +370,23 @@ void GameStateCapture::ReadPowerupInventory(GameStateFrame& frame)
     frame.rightTeamInventory[1].chargeCount = static_cast<u8>(Memory::Read_U32(team2_ptr + 0x54));
     frame.rightTeamInventory[1].isNew = Memory::Read_U8(team2_ptr + 0x58);
   }
+}
+
+void GameStateCapture::ReadTeamStats(GameStateFrame& frame)
+{
+  // Left team stats
+  frame.leftStats.shots = static_cast<u16>(Memory::Read_U32(Metadata::addressLeftSideShots));
+  frame.leftStats.hits = Memory::Read_U16(Metadata::addressLeftSideHits);
+  frame.leftStats.steals = Memory::Read_U16(Metadata::addressLeftSideSteals);
+  frame.leftStats.superStrikes = Memory::Read_U16(Metadata::addressLeftSideSuperStrikes);
+  frame.leftStats.perfectPasses = Memory::Read_U16(Metadata::addressLeftSidePerfectPasses);
+
+  // Right team stats
+  frame.rightStats.shots = static_cast<u16>(Memory::Read_U32(Metadata::addressRightSideShots));
+  frame.rightStats.hits = Memory::Read_U16(Metadata::addressRightSideHits);
+  frame.rightStats.steals = Memory::Read_U16(Metadata::addressRightSideSteals);
+  frame.rightStats.superStrikes = Memory::Read_U16(Metadata::addressRightSideSuperStrikes);
+  frame.rightStats.perfectPasses = Memory::Read_U16(Metadata::addressRightSidePerfectPasses);
 }
 
 void GameStateCapture::ReadItems(GameStateFrame& frame)
@@ -424,6 +484,16 @@ void GameStateCapture::EndCapture(const std::string& output_path)
   header.leftSidekickID = static_cast<u8>(Metadata::getLeftSideSidekickID());
   header.rightSidekickID = static_cast<u8>(Metadata::getRightSideSidekickID());
   header.stadiumID = static_cast<u8>(Metadata::getStadiumID());
+
+  // Field geometry (static per game — read from known data addresses)
+  const AddressSpace::Accessors* accessors =
+      AddressSpace::GetAccessors(AddressSpace::Type::Effective);
+  header.goalLineX = accessors->ReadF32(0x802a3e60);
+  header.sidelineY = accessors->ReadF32(0x802a3e64);
+  header.penaltyBoxX = accessors->ReadF32(0x80371108);
+  header.netHalfWidth = accessors->ReadF32(0x80371204);
+  header.netHeight = accessors->ReadF32(0x80371200);
+  header.netDepth = accessors->ReadF32(0x8037120c);
 
   file.WriteBytes(&header, sizeof(header));
 

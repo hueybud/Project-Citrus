@@ -40,7 +40,9 @@ public:
   static const u32 addressBallYPos = 0x80312ae0;
   static const u32 addressBallZPos = 0x80312ae4;
 
-  // Ball velocity (float)
+  // Ball velocity — legacy static mirrors used by Gecko Codes in the CIT flow.
+  // These addresses lag 1-2 frames behind on shots (stale mirror, not authoritative).
+  // CITF reads live velocity from the cBall object instead: ball_ptr+0x58 (X), +0x5C (Y), +0x60 (Z).
   static const u32 addressBallXVel = 0x80311010;
   static const u32 addressBallYVel = 0x80311014;
   static const u32 addressBallZVel = 0x80311018;

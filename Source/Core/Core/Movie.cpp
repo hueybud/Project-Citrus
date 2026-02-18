@@ -1088,11 +1088,11 @@ static bool LoadCITFInputs(const std::string& citf_path)
     return false;
   }
 
-  // Read CITF header (24 bytes)
+  // Read CITF header (48 bytes as of v7; v6 and earlier used 24 bytes)
   struct CITFHeader
   {
     char magic[4];       // "CITF"
-    u32 version;         // 4
+    u32 version;
     u32 frameCount;
     u32 fixedFrameSize;  // Size of fixed portion per frame
     u8 leftCaptainID;
@@ -1101,6 +1101,13 @@ static bool LoadCITFInputs(const std::string& citf_path)
     u8 rightSidekickID;
     u8 stadiumID;
     u8 headerPadding[3];
+    // v7+ field geometry
+    float goalLineX;
+    float sidelineY;
+    float penaltyBoxX;
+    float netHalfWidth;
+    float netHeight;
+    float netDepth;
   };
 
   CITFHeader header;
@@ -1124,12 +1131,13 @@ static bool LoadCITFInputs(const std::string& citf_path)
   // Allocate buffer for frame inputs
   s_citf_inputs.resize(header.frameCount);
 
-  // Frame structure offsets:
-  // gameTime(4) + movieFrameNumber(4) + score(4) + ball(32) + characters(240) = 284 bytes
-  // Then controller data starts
-  const size_t movie_frame_number_offset = 4;    // After gameTime
-  const size_t controller_offset = 284;
-  const size_t item_count_offset = 356;  // Offset to itemCount field (before items array)
+  // Frame structure offsets (computed from fixedFrameSize to support version changes):
+  // itemCount is always the last 4 bytes of the fixed portion (u8 + 3 padding)
+  // controller inputs (4 x 10 = 40 bytes) + inventory (4 x 8 = 32 bytes) precede itemCount
+  // So controllers start at fixedFrameSize - 4 - 32 - 40
+  const size_t movie_frame_number_offset = 4;    // After gameTime (stable across versions)
+  const size_t item_count_offset = header.fixedFrameSize - 4;
+  const size_t controller_offset = item_count_offset - 32 - 40;  // Before inventory and itemCount
 
   // Track actual file offset (frames have variable size due to items)
   u64 current_file_offset = sizeof(CITFHeader);

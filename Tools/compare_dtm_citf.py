@@ -123,7 +123,7 @@ def parse_citf_header(data):
         'version': version,
         'frame_count': frame_count,
         'fixed_frame_size': fixed_frame_size,
-        'header_size': 24
+        'header_size': 48
     }
 
 def parse_dtm_controller_input(data, offset):
