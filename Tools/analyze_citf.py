@@ -15,6 +15,20 @@ sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='repla
 from dataclasses import dataclass, field
 from typing import List, Optional
 
+ZSTD_MAGIC = b'\x28\xb5\x2f\xfd'
+
+def load_citf_bytes(path: str) -> bytes:
+    """Read a .citframes file, decompressing with zstd if needed."""
+    with open(path, 'rb') as f:
+        raw = f.read()
+    if raw[:4] == ZSTD_MAGIC:
+        try:
+            import zstandard as zstd
+        except ImportError:
+            sys.exit("zstandard package required for compressed CITF files: pip install zstandard")
+        return zstd.ZstdDecompressor().decompress(raw)
+    return raw
+
 # -- Enums --------------------------------------------------------------------
 
 CAPTAINS = {0: "Daisy", 1: "DK", 2: "Luigi", 3: "Mario", 4: "Peach",
@@ -796,8 +810,7 @@ def detect_shots(frames):
 def main():
     path = sys.argv[1] if len(sys.argv) > 1 else r"C:\Users\Brian\Documents\Dolphin Emulator\Citrus Replays\output.citframes"
 
-    with open(path, "rb") as f:
-        data = f.read()
+    data = load_citf_bytes(path)
 
     header = parse_header(data)
     print("=" * 90)

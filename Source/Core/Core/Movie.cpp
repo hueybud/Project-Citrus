@@ -8,6 +8,7 @@
 namespace fs = std::filesystem;
 #include "unzip.h"
 #include <picojson.h>
+#include <zstd.h>
 
 #include <algorithm>
 #include <array>
@@ -1227,30 +1228,67 @@ static CaptureMatchInfo ParseCITJson(const std::string& json_text)
   return info;
 }
 
-// Load CITF file and extract controller inputs for playback
+// Load CITF file and extract controller inputs for playback.
+// Supports both compressed (zstd) and uncompressed files — detected by first 4 bytes.
 static bool LoadCITFInputs(const std::string& citf_path)
 {
+  // Read entire file into memory
   File::IOFile file(citf_path, "rb");
   if (!file)
   {
     WARN_LOG_FMT(CORE, "Failed to open CITF file: {}", citf_path);
     return false;
   }
+  const u64 file_size = file.GetSize();
+  std::vector<u8> file_buf(file_size);
+  if (!file.ReadBytes(file_buf.data(), file_size))
+  {
+    ERROR_LOG_FMT(CORE, "Failed to read CITF file content");
+    return false;
+  }
+  file.Close();
 
-  // Read CITF header (48 bytes as of v7; v6 and earlier used 24 bytes)
+  // Detect and decompress zstd frames (magic bytes: 0xFD 0x2F 0xB5 0x28)
+  std::vector<u8> decomp_buf;
+  const u8* data = file_buf.data();
+  size_t data_size = static_cast<size_t>(file_size);
+
+  if (file_size >= 4 && data[0] == 0x28 && data[1] == 0xB5 &&
+      data[2] == 0x2F && data[3] == 0xFD)
+  {
+    const unsigned long long content_size =
+        ZSTD_getFrameContentSize(data, data_size);
+    if (content_size == ZSTD_CONTENTSIZE_ERROR || content_size == ZSTD_CONTENTSIZE_UNKNOWN)
+    {
+      ERROR_LOG_FMT(CORE, "CITF: Could not determine decompressed size");
+      return false;
+    }
+    decomp_buf.resize(static_cast<size_t>(content_size));
+    const size_t result = ZSTD_decompress(decomp_buf.data(), content_size, data, data_size);
+    if (ZSTD_isError(result))
+    {
+      ERROR_LOG_FMT(CORE, "CITF: zstd decompression failed: {}", ZSTD_getErrorName(result));
+      return false;
+    }
+    INFO_LOG_FMT(CORE, "CITF: Decompressed {} -> {} bytes ({:.1f}x ratio)",
+                 file_size, result, static_cast<float>(result) / file_size);
+    data = decomp_buf.data();
+    data_size = result;
+  }
+
+  // 48-byte base header (layout identical from v7 through v11+)
   struct CITFHeader
   {
-    char magic[4];       // "CITF"
+    char magic[4];
     u32 version;
     u32 frameCount;
-    u32 fixedFrameSize;  // Size of fixed portion per frame
+    u32 fixedFrameSize;
     u8 leftCaptainID;
     u8 rightCaptainID;
     u8 leftSidekickID;
     u8 rightSidekickID;
     u8 stadiumID;
     u8 headerPadding[3];
-    // v7+ field geometry
     float goalLineX;
     float sidelineY;
     float penaltyBoxX;
@@ -1259,14 +1297,15 @@ static bool LoadCITFInputs(const std::string& citf_path)
     float netDepth;
   };
 
-  CITFHeader header;
-  if (!file.ReadBytes(&header, sizeof(header)))
+  if (data_size < sizeof(CITFHeader))
   {
-    ERROR_LOG_FMT(CORE, "Failed to read CITF header");
+    ERROR_LOG_FMT(CORE, "CITF: Buffer too small for header ({} bytes)", data_size);
     return false;
   }
 
-  // Verify magic
+  CITFHeader header;
+  std::memcpy(&header, data, sizeof(header));
+
   if (std::memcmp(header.magic, "CITF", 4) != 0)
   {
     ERROR_LOG_FMT(CORE, "Invalid CITF magic: {}{}{}{}", header.magic[0], header.magic[1],
@@ -1277,7 +1316,6 @@ static bool LoadCITFInputs(const std::string& citf_path)
   INFO_LOG_FMT(CORE, "Loading CITF inputs: {} frames, fixedFrameSize={}, version={}",
                header.frameCount, header.fixedFrameSize, header.version);
 
-  // Allocate buffer for frame inputs
   s_citf_inputs.resize(header.frameCount);
 
   // Frame structure offsets (computed from fixedFrameSize to support version changes):
@@ -1288,62 +1326,46 @@ static bool LoadCITFInputs(const std::string& citf_path)
   //   controllers: 4 ports x 10 bytes = 40 bytes
   const size_t movie_frame_number_offset = 4;  // After gameTime (stable across versions)
   const size_t item_count_offset = header.fixedFrameSize - 4;
-  const size_t team_stats_size = (header.version >= 8) ? 24 : 0;  // Added in v8
+  const size_t team_stats_size = (header.version >= 8) ? 24 : 0;
   const size_t controller_offset = item_count_offset - team_stats_size - 32 - 40;
 
-  // Track actual file offset (frames have variable size due to items).
-  // v11+ header is 273 bytes (48-byte base + 225-byte metadata extension).
-  // v10 and earlier headers are 48 bytes.
-  u64 current_file_offset = (header.version >= 11) ? 273 : sizeof(CITFHeader);
+  // v11+ header is 273 bytes; v10 and earlier is 48 bytes
+  size_t current_offset = (header.version >= 11) ? 273 : sizeof(CITFHeader);
 
-  // Read each frame's movieFrameNumber and controller inputs
+  // FrameControllerInput layout (10 bytes, matches packed struct in GameStateFrame.h)
+  struct CITFControllerInput
+  {
+    u16 buttons;
+    u8 stickX;
+    u8 stickY;
+    u8 substickX;
+    u8 substickY;
+    u8 triggerLeft;
+    u8 triggerRight;
+    u8 isConnected;
+    u8 padding;
+  };
+
   for (u32 frame_idx = 0; frame_idx < header.frameCount; frame_idx++)
   {
-    // Seek to this frame's start
-    file.Seek(current_file_offset, File::SeekOrigin::Begin);
-
-    // Skip gameTime(4 bytes) to reach movieFrameNumber
-    file.Seek(movie_frame_number_offset, File::SeekOrigin::Current);
-
-    // Read movieFrameNumber (u32)
-    u32 movie_frame_number;
-    if (!file.ReadBytes(&movie_frame_number, sizeof(movie_frame_number)))
+    if (current_offset + header.fixedFrameSize > data_size)
     {
-      ERROR_LOG_FMT(CORE, "Failed to read movieFrameNumber at frame {}", frame_idx);
+      ERROR_LOG_FMT(CORE, "CITF: Unexpected end of data at frame {}", frame_idx);
       return false;
     }
-    s_citf_inputs[frame_idx].movieFrameNumber = movie_frame_number;
 
-    // Seek to controller data (from start of frame)
-    file.Seek(current_file_offset + controller_offset, File::SeekOrigin::Begin);
+    // Read movieFrameNumber
+    std::memcpy(&s_citf_inputs[frame_idx].movieFrameNumber,
+                data + current_offset + movie_frame_number_offset, sizeof(u32));
 
-    // Read all 4 controllers for this frame
+    // Read all 4 controller inputs
     for (int port = 0; port < 4; port++)
     {
-      // FrameControllerInput structure: buttons(2) + stickX(1) + stickY(1) + substickX(1) +
-      //                                  substickY(1) + triggerLeft(1) + triggerRight(1) +
-      //                                  isConnected(1) + padding(1) = 10 bytes
-      struct CITFControllerInput
-      {
-        u16 buttons;
-        u8 stickX;
-        u8 stickY;
-        u8 substickX;
-        u8 substickY;
-        u8 triggerLeft;
-        u8 triggerRight;
-        u8 isConnected;
-        u8 padding;
-      };
-
       CITFControllerInput citf_input;
-      if (!file.ReadBytes(&citf_input, sizeof(citf_input)))
-      {
-        ERROR_LOG_FMT(CORE, "Failed to read controller input at frame {}, port {}", frame_idx, port);
-        return false;
-      }
+      std::memcpy(&citf_input,
+                  data + current_offset + controller_offset + port * sizeof(CITFControllerInput),
+                  sizeof(CITFControllerInput));
 
-      // Convert to GCPadStatus
       GCPadStatus& pad = s_citf_inputs[frame_idx].controllers[port];
       pad.button = citf_input.buttons;
       pad.stickX = citf_input.stickX;
@@ -1353,52 +1375,35 @@ static bool LoadCITFInputs(const std::string& citf_path)
       pad.triggerLeft = citf_input.triggerLeft;
       pad.triggerRight = citf_input.triggerRight;
       pad.isConnected = (citf_input.isConnected != 0);
-
-      // Set analog button values based on digital button state
       pad.analogA = (citf_input.buttons & 0x0100) ? 0xFF : 0;  // PAD_BUTTON_A
       pad.analogB = (citf_input.buttons & 0x0200) ? 0xFF : 0;  // PAD_BUTTON_B
     }
 
-    // Update file offset for next frame (frames have variable size due to items)
-    // Read itemCount to determine this frame's actual size
-    file.Seek(current_file_offset + item_count_offset, File::SeekOrigin::Begin);
-    u8 item_count;
-    if (!file.ReadBytes(&item_count, sizeof(item_count)))
-    {
-      ERROR_LOG_FMT(CORE, "Failed to read itemCount at frame {}", frame_idx);
-      return false;
-    }
-
-    // Calculate this frame's total size: fixed portion + variable items
-    u64 frame_total_size = header.fixedFrameSize + (item_count * 48);  // sizeof(FrameItem) = 48
-    current_file_offset += frame_total_size;
+    // Advance to next frame (variable size due to items)
+    const u8 item_count = data[current_offset + item_count_offset];
+    current_offset += header.fixedFrameSize + item_count * 48;  // sizeof(FrameItem) = 48
   }
 
   INFO_LOG_FMT(CORE, "Successfully loaded {} frames of CITF inputs from {}", header.frameCount,
                citf_path);
 
-  // Debug: Log first few frame's movieFrameNumbers to verify alignment
-  INFO_LOG_FMT(CORE, "CITF movieFrameNumber progression (first 10 frames):");
+  // Debug: verify movieFrameNumber progression on first 10 frames
   u32 prev_movie_frame = 0;
   bool is_sorted = true;
   for (u32 i = 0; i < std::min(10u, header.frameCount); i++)
   {
-    u32 curr_movie_frame = s_citf_inputs[i].movieFrameNumber;
-    INFO_LOG_FMT(CORE, "  CITF frame {} -> movieFrameNumber={}", i, curr_movie_frame);
-
-    if (i > 0 && curr_movie_frame <= prev_movie_frame)
+    const u32 curr = s_citf_inputs[i].movieFrameNumber;
+    INFO_LOG_FMT(CORE, "  CITF frame {} -> movieFrameNumber={}", i, curr);
+    if (i > 0 && curr <= prev_movie_frame)
     {
-      ERROR_LOG_FMT(CORE, "  WARNING: movieFrameNumber not increasing! {} <= {}",
-                    curr_movie_frame, prev_movie_frame);
+      ERROR_LOG_FMT(CORE, "  WARNING: movieFrameNumber not increasing! {} <= {}", curr,
+                    prev_movie_frame);
       is_sorted = false;
     }
-    prev_movie_frame = curr_movie_frame;
+    prev_movie_frame = curr;
   }
-
   if (!is_sorted)
-  {
     ERROR_LOG_FMT(CORE, "CITF movieFrameNumbers are not sorted! Playback may be incorrect.");
-  }
 
   return true;
 }

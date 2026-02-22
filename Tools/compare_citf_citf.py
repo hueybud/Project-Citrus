@@ -25,6 +25,19 @@ from pathlib import Path
 # Force UTF-8 output on Windows
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
 
+ZSTD_MAGIC = b'\x28\xb5\x2f\xfd'
+
+def _read_citf_bytes(path):
+    with open(path, 'rb') as f:
+        raw = f.read()
+    if raw[:4] == ZSTD_MAGIC:
+        try:
+            import zstandard as zstd
+        except ImportError:
+            sys.exit("zstandard package required for compressed CITF files: pip install zstandard")
+        return zstd.ZstdDecompressor().decompress(raw)
+    return raw
+
 # ---------------------------------------------------------------------------
 # Enums (mirrors analyze_citf.py)
 # ---------------------------------------------------------------------------
@@ -296,8 +309,7 @@ def parse_frame(data, offset, fixed_size):
 
 def load_citf(path):
     """Load and parse a CITF file. Returns (header_dict, list[frame_dict])."""
-    with open(path, 'rb') as f:
-        data = f.read()
+    data = _read_citf_bytes(path)
 
     header = parse_file_header(data)
     fixed_size = header['fixed_frame_size']

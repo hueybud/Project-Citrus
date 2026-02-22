@@ -18,6 +18,20 @@ import struct
 import sys
 from pathlib import Path
 
+ZSTD_MAGIC = b'\x28\xb5\x2f\xfd'
+
+def load_citf_bytes(path):
+    """Read a .citframes file, decompressing with zstd if needed."""
+    with open(path, 'rb') as f:
+        raw = f.read()
+    if raw[:4] == ZSTD_MAGIC:
+        try:
+            import zstandard as zstd
+        except ImportError:
+            sys.exit("zstandard package required for compressed CITF files: pip install zstandard")
+        return zstd.ZstdDecompressor().decompress(raw)
+    return raw
+
 # PAD_BUTTON_* and PAD_* flag definitions (from GCPadStatus.h)
 PAD_BUTTON_LEFT = 0x0001
 PAD_BUTTON_RIGHT = 0x0002
@@ -197,8 +211,7 @@ def compare_controller1(dtm_path, citf_path, sample_every=1, show_mismatches=10)
     with open(dtm_path, 'rb') as f:
         dtm_data = f.read()
 
-    with open(citf_path, 'rb') as f:
-        citf_data = f.read()
+    citf_data = load_citf_bytes(citf_path)
 
     # Parse headers
     print("=" * 80)

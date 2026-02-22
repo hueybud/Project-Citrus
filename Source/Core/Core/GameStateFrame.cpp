@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstring>
 #include <vector>
+#include <zstd.h>
 
 #include "Common/CommonPaths.h"
 #include "Common/FileUtil.h"
@@ -464,18 +465,10 @@ void GameStateCapture::EndCapture(const std::string& output_path)
     return;
   }
 
-  File::IOFile file(output_path, "wb");
-  if (!file.IsOpen())
-  {
-    ERROR_LOG_FMT(CORE, "GameStateCapture: Failed to open output file: {}", output_path);
-    s_frame_buffer.clear();
-    return;
-  }
-
   // Fixed portion size: everything before the items array
   constexpr u32 fixed_frame_size = static_cast<u32>(offsetof(GameStateFrame, items));
 
-  // Build and write header
+  // Build header
   CaptureHeader header;
   std::memset(&header, 0, sizeof(header));
   header.magic[0] = 'C';
@@ -526,22 +519,56 @@ void GameStateCapture::EndCapture(const std::string& output_path)
     header.portPlayers[i].displayName[31] = '\0';
   }
 
-  file.WriteBytes(&header, sizeof(header));
+  // Assemble raw binary: header then variable-length frames
+  size_t raw_size = sizeof(header);
+  for (const auto& frame : s_frame_buffer)
+    raw_size += fixed_frame_size + frame.itemCount * sizeof(FrameItem);
 
-  // Write variable-length frames: fixed portion + only active items
-  size_t total_bytes = sizeof(header);
+  std::vector<u8> raw;
+  raw.reserve(raw_size);
+
+  const u8* hdr_bytes = reinterpret_cast<const u8*>(&header);
+  raw.insert(raw.end(), hdr_bytes, hdr_bytes + sizeof(header));
+
   for (const auto& frame : s_frame_buffer)
   {
-    file.WriteBytes(&frame, fixed_frame_size);
+    const u8* frame_bytes = reinterpret_cast<const u8*>(&frame);
+    raw.insert(raw.end(), frame_bytes, frame_bytes + fixed_frame_size);
     if (frame.itemCount > 0)
     {
-      file.WriteBytes(frame.items, frame.itemCount * sizeof(FrameItem));
+      const u8* item_bytes = reinterpret_cast<const u8*>(frame.items);
+      raw.insert(raw.end(), item_bytes, item_bytes + frame.itemCount * sizeof(FrameItem));
     }
-    total_bytes += fixed_frame_size + frame.itemCount * sizeof(FrameItem);
   }
 
-  INFO_LOG_FMT(CORE, "GameStateCapture: Wrote {} frames ({} bytes) to {}", header.frameCount,
-               total_bytes, output_path);
+  // Compress with zstd (level 19 = max compression; fine since we compress once per match)
+  const size_t compress_bound = ZSTD_compressBound(raw.size());
+  std::vector<u8> compressed(compress_bound);
+  const size_t compressed_size =
+      ZSTD_compress(compressed.data(), compress_bound, raw.data(), raw.size(), 19);
+
+  if (ZSTD_isError(compressed_size))
+  {
+    ERROR_LOG_FMT(CORE, "GameStateCapture: zstd compression failed: {}",
+                  ZSTD_getErrorName(compressed_size));
+    s_frame_buffer.clear();
+    return;
+  }
+
+  File::IOFile file(output_path, "wb");
+  if (!file.IsOpen())
+  {
+    ERROR_LOG_FMT(CORE, "GameStateCapture: Failed to open output file: {}", output_path);
+    s_frame_buffer.clear();
+    return;
+  }
+
+  file.WriteBytes(compressed.data(), compressed_size);
+
+  INFO_LOG_FMT(CORE, "GameStateCapture: Wrote {} frames ({} bytes raw -> {} bytes compressed, "
+               "{:.1f}x ratio) to {}",
+               header.frameCount, raw.size(), compressed_size,
+               static_cast<float>(raw.size()) / compressed_size, output_path);
 
   s_frame_buffer.clear();
 }
