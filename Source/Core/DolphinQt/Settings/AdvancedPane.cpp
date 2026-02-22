@@ -175,10 +175,12 @@ void AdvancedPane::CreateLayout()
   movie_options->setLayout(movie_options_layout);
   main_layout->addWidget(movie_options);
 
-  m_movie_use_null_backend_checkbox = new QCheckBox(tr("Use Null Graphics Backend During Playback"));
+  m_movie_use_null_backend_checkbox =
+      new QCheckBox(tr("Use Null Graphics Backend and Unlimited Speed During Playback"));
   m_movie_use_null_backend_checkbox->setToolTip(
-      tr("Forces the Null graphics backend when playing back a movie, ignoring the backend stored "
-         "in the recording. Useful for headless batch replay (e.g. CIT to CITF conversion)."));
+      tr("Forces the Null graphics backend and unlimited emulation speed when playing back a "
+         "movie, ignoring the backend stored in the recording. Useful for headless batch replay "
+         "(e.g. CIT to CITF conversion)."));
   movie_options_layout->addWidget(m_movie_use_null_backend_checkbox);
 
   main_layout->addStretch(1);

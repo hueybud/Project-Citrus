@@ -74,7 +74,9 @@ bool BootCore(std::unique_ptr<BootParameters> boot, const WindowSystemInfo& wsi)
 
   // overwrite savestate texture cache option to always be false. keeps savestates to minimum size
   Config::SetBaseOrCurrent(Config::GFX_SAVE_TEXTURE_CACHE_TO_STATE, false);
-  Config::SetBaseOrCurrent(Config::MAIN_EMULATION_SPEED, 1.0f);
+  const float target_speed =
+      (Config::Get(Config::MAIN_MOVIE_USE_NULL_BACKEND) && Movie::IsPlayingInput()) ? 0.0f : 1.0f;
+  Config::SetBaseOrCurrent(Config::MAIN_EMULATION_SPEED, target_speed);
 
   // set replay and default gecko codes bool value to false for this instance of core
   StateAuxillary::setBoolMatchStart(false);
