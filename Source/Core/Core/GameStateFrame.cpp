@@ -19,6 +19,7 @@
 // Static state
 static std::vector<GameStateFrame> s_frame_buffer;
 static bool s_capturing = false;
+static CaptureMatchInfo s_match_info;
 
 // Buffered controller inputs from last Movie::PlayController() call
 struct BufferedInput
@@ -30,7 +31,7 @@ struct BufferedInput
 static std::array<BufferedInput, 4> s_buffered_inputs{};
 
 // Binary file format constants
-static constexpr u32 CITF_VERSION = 10;
+static constexpr u32 CITF_VERSION = 11;
 
 void GameStateCapture::BeginCapture()
 {
@@ -52,6 +53,11 @@ void GameStateCapture::BeginCapture()
 bool GameStateCapture::IsCapturing()
 {
   return s_capturing;
+}
+
+void GameStateCapture::SetMatchInfo(const CaptureMatchInfo& info)
+{
+  s_match_info = info;
 }
 
 void GameStateCapture::OnControllerInput(int port, const GCPadStatus& pad, u64 inputCount)
@@ -494,6 +500,31 @@ void GameStateCapture::EndCapture(const std::string& output_path)
   header.netHalfWidth = accessors->ReadF32(0x80371204);
   header.netHeight = accessors->ReadF32(0x80371200);
   header.netDepth = accessors->ReadF32(0x8037120c);
+
+  // v11 match metadata — sourced from s_match_info (populated by SetMatchInfo from CIT JSON)
+  header.epoch                = s_match_info.epoch;
+  header.citrusGameId         = s_match_info.citrusGameId;
+  header.submittedByDiscordId = s_match_info.submittedByDiscordId;
+  header.roomId               = s_match_info.roomId;
+  header.gameCount            = s_match_info.gameCount;
+  header.isRanked             = s_match_info.isRanked ? 1 : 0;
+  header.isNetplay            = s_match_info.isNetplay ? 1 : 0;
+  header.matchTimeAllotted    = s_match_info.matchTimeAllotted;
+  header.matchDifficulty      = s_match_info.matchDifficulty;
+  header.matchItems           = s_match_info.matchItems ? 1 : 0;
+  header.matchSuperStrikes    = s_match_info.matchSuperStrikes ? 1 : 0;
+  header.matchBowserOrFTX     = s_match_info.matchBowserOrFTX ? 1 : 0;
+  header.overtimeNotReached   = s_match_info.overtimeNotReached ? 1 : 0;
+  header.matchTimeElapsed     = s_match_info.matchTimeElapsed;
+  std::memcpy(header.md5, s_match_info.md5.data(), 16);
+  for (int i = 0; i < 4; i++)
+  {
+    const auto& pe = s_match_info.ports[i];
+    header.portTeam[i]                = pe.team;
+    header.portPlayers[i].discordId   = pe.discordId;
+    std::strncpy(header.portPlayers[i].displayName, pe.displayName.c_str(), 31);
+    header.portPlayers[i].displayName[31] = '\0';
+  }
 
   file.WriteBytes(&header, sizeof(header));
 

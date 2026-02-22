@@ -7,6 +7,7 @@
 #include <iostream>
 namespace fs = std::filesystem;
 #include "unzip.h"
+#include <picojson.h>
 
 #include <algorithm>
 #include <array>
@@ -137,6 +138,7 @@ struct CITFFrameInputs
 static std::vector<CITFFrameInputs> s_citf_inputs;  // CITF frames (indexed by capture order, not movieFrameNumber)
 static bool s_use_citf_inputs = false;               // True if playing back from CITF instead of DTM
 static std::string s_citf_file_path;                 // Path to .citframes file if found
+static std::string s_cit_stem_name;                  // Stem of the .cit file being played (e.g. "game1")
 
 // s_InputDisplay is used by both CPU and GPU (is mutable).
 static std::mutex s_input_display_lock;
@@ -387,6 +389,11 @@ u64 GetTotalFrames()
 u64 GetCurrentInputCount()
 {
   return s_currentInputCount;
+}
+
+std::string GetCITStemName()
+{
+  return s_cit_stem_name;
 }
 
 const GCPadStatus* GetCITFInput(int controller, u64 inputCount)
@@ -1078,6 +1085,148 @@ void ReadHeader()
 #define MAX_FILENAME 512
 #define READ_SIZE 8192
 
+// Strip locale-formatted commas from numeric strings (e.g. "1,751,851,212" -> "1751851212")
+static std::string StripCommas(const std::string& s)
+{
+  std::string out;
+  out.reserve(s.size());
+  for (char c : s)
+    if (c != ',')
+      out += c;
+  return out;
+}
+
+// Parse CIT output.json text into a CaptureMatchInfo struct
+static CaptureMatchInfo ParseCITJson(const std::string& json_text)
+{
+  CaptureMatchInfo info;
+  picojson::value v;
+  std::string err = picojson::parse(v, json_text);
+  if (!err.empty() || !v.is<picojson::object>())
+  {
+    WARN_LOG_FMT(CORE, "CIT JSON parse error: {}", err);
+    return info;
+  }
+  const auto& obj = v.get<picojson::object>();
+
+  auto getStr = [&](const std::string& key) -> std::string {
+    auto it = obj.find(key);
+    return (it != obj.end() && it->second.is<std::string>()) ? it->second.get<std::string>() : "";
+  };
+
+  // epoch ("1,751,851,212" -> u64)
+  std::string epoch_str = StripCommas(getStr("Epoch"));
+  if (!epoch_str.empty())
+    info.epoch = std::stoull(epoch_str);
+
+  // roomId ("68485da2" -> u32)
+  std::string rid = getStr("Room ID");
+  if (!rid.empty() && rid != "Empty")
+    info.roomId = static_cast<u32>(std::stoul(rid, nullptr, 16));
+
+  // gameCount ("1" -> u16)
+  std::string gc_str = StripCommas(getStr("Game Count"));
+  if (!gc_str.empty())
+    info.gameCount = static_cast<u16>(std::stoul(gc_str));
+
+  // citrusGameId ("68485da201" -> u64)
+  std::string cgid = getStr("Citrus Game Id");
+  if (!cgid.empty())
+    info.citrusGameId = std::stoull(cgid, nullptr, 16);
+
+  // submittedByDiscordId ("372784675359424512" -> u64)
+  std::string sb = getStr("submittedBy");
+  if (!sb.empty() && sb != "Empty")
+    info.submittedByDiscordId = std::stoull(sb);
+
+  // md5 ("8788cfdf60258c975fcb8632eb295f58" -> u8[16])
+  std::string hash = getStr("Game Hash");
+  for (int i = 0; i < 16 && (i * 2 + 1) < static_cast<int>(hash.size()); i++)
+    info.md5[i] = static_cast<u8>(std::stoul(hash.substr(i * 2, 2), nullptr, 16));
+
+  // boolean flags
+  info.isRanked           = (getStr("isRanked") == "1");
+  info.isNetplay          = (getStr("Netplay Match") == "1");
+  info.overtimeNotReached = (getStr("Overtime Not Reached") == "1");
+  info.matchItems         = (getStr("Match Items") == "1");
+  info.matchSuperStrikes  = (getStr("Match Super Strikes") == "1");
+  info.matchBowserOrFTX   = (getStr("Match Bowser or FTX") == "1");
+
+  // match settings
+  std::string mta = StripCommas(getStr("Match Time Allotted"));
+  if (!mta.empty())
+    info.matchTimeAllotted = static_cast<u16>(std::stoul(mta));
+
+  std::string diff = getStr("Match Difficulty");
+  if (!diff.empty())
+    info.matchDifficulty = static_cast<u8>(std::stoul(diff));
+
+  std::string elapsed = getStr("Match Time Elapsed");
+  if (!elapsed.empty())
+    info.matchTimeElapsed = std::stof(elapsed);
+
+  // Controller port team assignments from "Controller Port Info" object
+  auto portIt = obj.find("Controller Port Info");
+  if (portIt != obj.end() && portIt->second.is<picojson::object>())
+  {
+    const auto& ports = portIt->second.get<picojson::object>();
+    for (int i = 0; i < 4; i++)
+    {
+      auto pit = ports.find("Controller Port " + std::to_string(i));
+      if (pit != ports.end() && pit->second.is<double>())
+      {
+        int val = static_cast<int>(pit->second.get<double>());
+        info.ports[i].team = (val == 0) ? 0 : (val == 1) ? 1 : 0xFF;
+      }
+      else
+      {
+        info.ports[i].team = 0xFF;
+      }
+    }
+  }
+
+  // Player info from "Left Team Player Info" and "Right Team Player Info" arrays.
+  // Each entry is ["P1 - PoolBoi", "372784675359424512"].
+  // The name encodes port: "P1 - ..." -> port 0, "P2 - ..." -> port 1, etc.
+  auto parseTeamPlayers = [&](const std::string& key)
+  {
+    auto it = obj.find(key);
+    if (it == obj.end() || !it->second.is<picojson::array>())
+      return;
+    for (const auto& entry : it->second.get<picojson::array>())
+    {
+      if (!entry.is<picojson::array>())
+        continue;
+      const auto& arr = entry.get<picojson::array>();
+      if (arr.size() < 2)
+        continue;
+      if (!arr[0].is<std::string>() || !arr[1].is<std::string>())
+        continue;
+
+      std::string nameWithPort = arr[0].get<std::string>();  // "P1 - PoolBoi"
+      std::string discordIdStr = arr[1].get<std::string>();  // "372784675359424512"
+
+      // Extract port index from "P1 - " prefix
+      int port = -1;
+      if (nameWithPort.size() >= 3 && nameWithPort[0] == 'P' && nameWithPort[2] == ' ')
+        port = nameWithPort[1] - '1';  // "P1" -> 0, "P2" -> 1, etc.
+      if (port < 0 || port > 3)
+        continue;
+
+      // Strip "Px - " prefix (5 chars) to get raw display name
+      std::string rawName = (nameWithPort.size() > 5) ? nameWithPort.substr(5) : nameWithPort;
+
+      info.ports[port].displayName = rawName;
+      if (!discordIdStr.empty() && discordIdStr != "Empty")
+        info.ports[port].discordId = std::stoull(discordIdStr);
+    }
+  };
+  parseTeamPlayers("Left Team Player Info");
+  parseTeamPlayers("Right Team Player Info");
+
+  return info;
+}
+
 // Load CITF file and extract controller inputs for playback
 static bool LoadCITFInputs(const std::string& citf_path)
 {
@@ -1125,8 +1274,8 @@ static bool LoadCITFInputs(const std::string& citf_path)
     return false;
   }
 
-  INFO_LOG_FMT(CORE, "Loading CITF inputs: {} frames, fixedFrameSize={}", header.frameCount,
-               header.fixedFrameSize);
+  INFO_LOG_FMT(CORE, "Loading CITF inputs: {} frames, fixedFrameSize={}, version={}",
+               header.frameCount, header.fixedFrameSize, header.version);
 
   // Allocate buffer for frame inputs
   s_citf_inputs.resize(header.frameCount);
@@ -1142,8 +1291,10 @@ static bool LoadCITFInputs(const std::string& citf_path)
   const size_t team_stats_size = (header.version >= 8) ? 24 : 0;  // Added in v8
   const size_t controller_offset = item_count_offset - team_stats_size - 32 - 40;
 
-  // Track actual file offset (frames have variable size due to items)
-  u64 current_file_offset = sizeof(CITFHeader);
+  // Track actual file offset (frames have variable size due to items).
+  // v11+ header is 273 bytes (48-byte base + 225-byte metadata extension).
+  // v10 and earlier headers are 48 bytes.
+  u64 current_file_offset = (header.version >= 11) ? 273 : sizeof(CITFHeader);
 
   // Read each frame's movieFrameNumber and controller inputs
   for (u32 frame_idx = 0; frame_idx < header.frameCount; frame_idx++)
@@ -1278,6 +1429,7 @@ bool PlayInput(const std::string& movie_path, std::optional<std::string>* savest
   fs::path temp_movie_path = movie_path;
   if (temp_movie_path.extension() == ".cit")
   {
+    s_cit_stem_name = temp_movie_path.stem().string();
     // unzip and store the cit file path to movie_path
     unzFile zipfile = unzOpen(movie_path.c_str());
     if (zipfile == NULL)
@@ -1286,6 +1438,9 @@ bool PlayInput(const std::string& movie_path, std::optional<std::string>* savest
     }
 
     bool boolFoundOutputSav = false;
+    std::string json_file_path;  // path to extracted output.json, if found
+    // Reset match info from any prior CIT before parsing this one
+    GameStateCapture::SetMatchInfo(CaptureMatchInfo{});
 
     // Get info about the zip file
     unz_global_info global_info;
@@ -1347,6 +1502,11 @@ bool PlayInput(const std::string& movie_path, std::optional<std::string>* savest
           INFO_LOG_FMT(CORE, "We found a CITF file in the CIT: {}", extractHere);
           s_citf_file_path = extractHere;
         }
+        if (foundDTMFile.extension() == ".json")
+        {
+          INFO_LOG_FMT(CORE, "We found a JSON file in the CIT: {}", extractHere);
+          json_file_path = extractHere;
+        }
         if (unzOpenCurrentFile(zipfile) != UNZ_OK)
         {
           printf("could not open file\n");
@@ -1397,6 +1557,26 @@ bool PlayInput(const std::string& movie_path, std::optional<std::string>* savest
     }
 
     unzClose(zipfile);
+
+    // Parse the CIT output.json (if found) to populate match metadata for the v11 CITF header
+    if (!json_file_path.empty())
+    {
+      std::string json_text;
+      if (File::ReadFileToString(json_file_path, json_text))
+      {
+        CaptureMatchInfo match_info = ParseCITJson(json_text);
+        GameStateCapture::SetMatchInfo(match_info);
+        INFO_LOG_FMT(CORE, "CIT JSON parsed: epoch={} roomId={:08X} gameCount={} "
+                     "players: P0='{}' P1='{}' P2='{}' P3='{}'",
+                     match_info.epoch, match_info.roomId, match_info.gameCount,
+                     match_info.ports[0].displayName, match_info.ports[1].displayName,
+                     match_info.ports[2].displayName, match_info.ports[3].displayName);
+      }
+      else
+      {
+        WARN_LOG_FMT(CORE, "Failed to read CIT JSON file: {}", json_file_path);
+      }
+    }
 
     // Check if a CITF file was found and load it for input playback
     if (!s_citf_file_path.empty())

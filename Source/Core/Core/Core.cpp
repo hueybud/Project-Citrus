@@ -504,7 +504,9 @@ void OnFrameEnd()
     // During replay playback, end per-frame game state capture and write to disk
     if (GameStateCapture::IsCapturing())
     {
-      std::string output_path = File::GetUserPath(D_CITRUSREPLAYS_IDX) + "output.citframes";
+      std::string cit_stem = Movie::GetCITStemName();
+      std::string basename = cit_stem.empty() ? "output" : cit_stem;
+      std::string output_path = File::GetUserPath(D_CITRUSREPLAYS_IDX) + basename + ".citframes";
       GameStateCapture::EndCapture(output_path);
     }
 

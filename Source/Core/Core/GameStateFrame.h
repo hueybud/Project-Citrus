@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <string>
 #include <vector>
 
@@ -9,11 +10,20 @@ struct GCPadStatus;
 
 #pragma pack(push, 1)
 
+// Per-port player identity stored in v11+ header (40 bytes)
+struct PortPlayerInfo
+{
+  u64  discordId;        // Discord user ID; 0 = no human player on this port
+  char displayName[32];  // Raw display name (no "Px - " prefix), null-terminated
+};
+// 40 bytes
+
 // Written once in the file header — static match info
 struct CaptureHeader
 {
+  // --- Existing fields (48 bytes, unchanged through v10) ---
   char magic[4];          // "CITF"
-  u32 version;            // 10
+  u32 version;            // 11
   u32 frameCount;
   u32 fixedFrameSize;     // size of fixed portion per frame (excludes variable items)
 
@@ -32,8 +42,29 @@ struct CaptureHeader
   float netHalfWidth;     // Half-width of the goal net (FLOAT_80371204)
   float netHeight;        // Height of the goal net (FLOAT_80371200)
   float netDepth;         // Depth of the goal net (DAT_8037120c)
+
+  // --- v11 match metadata (225 bytes appended after the 48-byte base block) ---
+  u64  epoch;                   // Unix timestamp (seconds since 1970-01-01)
+  u64  citrusGameId;            // Citrus Game ID as u64 (e.g. "68485da201" -> 0x68485DA201)
+  u64  submittedByDiscordId;    // Discord ID of the player who submitted the CIT
+  u32  roomId;                  // Room ID as u32 (e.g. "68485da2" -> 0x68485DA2)
+  u16  gameCount;               // Game count within this session
+  u8   isRanked;                // 1 = ranked match
+  u8   isNetplay;               // 1 = netplay match
+  u16  matchTimeAllotted;       // Seconds (e.g. 300)
+  u8   matchDifficulty;         // 0-5
+  u8   matchItems;              // 1 = items enabled
+  u8   matchSuperStrikes;       // 1 = super strikes enabled
+  u8   matchBowserOrFTX;        // 1 = Bowser/FTX enabled
+  u8   overtimeNotReached;      // 1 = ended in regulation
+  u8   matchInfoPadding[2];     // reserved for future flags
+  float matchTimeElapsed;       // Actual elapsed match time (seconds)
+  u8   md5[16];                 // ISO hash (mirrors DTM header, from JSON "Game Hash")
+  u8   portTeam[4];             // Team per port: 0=left, 1=right, 0xFF=disconnected
+  PortPlayerInfo portPlayers[4];  // Player info indexed by port (4 x 40 = 160 bytes)
 };
-// 48 bytes
+// 48 + 225 = 273 bytes
+static_assert(sizeof(CaptureHeader) == 273, "CaptureHeader must be 273 bytes");
 
 struct FrameControllerInput
 {
@@ -174,6 +205,35 @@ struct GameStateFrame
 
 #pragma pack(pop)
 
+// Non-packed helper struct for populating v11 match metadata before EndCapture.
+// Parsed from the CIT's output.json and fed into EndCapture via SetMatchInfo.
+struct CaptureMatchInfo
+{
+  u64  epoch = 0;
+  u64  citrusGameId = 0;
+  u64  submittedByDiscordId = 0;
+  u32  roomId = 0;
+  u16  gameCount = 0;
+  bool isRanked = false;
+  bool isNetplay = false;
+  u16  matchTimeAllotted = 0;
+  u8   matchDifficulty = 0;
+  bool matchItems = false;
+  bool matchSuperStrikes = false;
+  bool matchBowserOrFTX = false;
+  bool overtimeNotReached = false;
+  float matchTimeElapsed = 0.0f;
+  std::array<u8, 16> md5{};
+
+  struct PortEntry
+  {
+    u64 discordId = 0;
+    std::string displayName;  // raw name only, no "Px - " prefix
+    u8 team = 0xFF;           // 0=left, 1=right, 0xFF=disconnected
+  };
+  std::array<PortEntry, 4> ports{};
+};
+
 // Capture system for recording per-frame game state during replay playback.
 // Static interface following the Metadata/StateAuxillary pattern.
 class GameStateCapture
@@ -190,6 +250,10 @@ public:
 
   // Check if capture is active
   static bool IsCapturing();
+
+  // Store match metadata parsed from the CIT's output.json.
+  // Must be called from PlayInput() before BeginCapture() fires.
+  static void SetMatchInfo(const CaptureMatchInfo& info);
 
   // Called immediately when controller input is read during playback
   static void OnControllerInput(int port, const GCPadStatus& pad, u64 inputCount);

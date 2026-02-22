@@ -110,7 +110,7 @@ def parse_dtm_header(data):
     }
 
 def parse_citf_header(data):
-    """Parse CITF file header."""
+    """Parse CITF file header (v7-v11)."""
     magic = data[0:4]
     if magic != b'CITF':
         raise ValueError(f"Invalid CITF magic: {magic}")
@@ -119,11 +119,14 @@ def parse_citf_header(data):
     frame_count = struct.unpack('<I', data[0x08:0x0C])[0]
     fixed_frame_size = struct.unpack('<I', data[0x0C:0x10])[0]
 
+    # v11+ header is 273 bytes (48-byte base + 225-byte match metadata)
+    header_size = 273 if version >= 11 else 48
+
     return {
         'version': version,
         'frame_count': frame_count,
         'fixed_frame_size': fixed_frame_size,
-        'header_size': 48
+        'header_size': header_size
     }
 
 def parse_dtm_controller_input(data, offset):

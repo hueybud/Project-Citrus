@@ -180,6 +180,11 @@ def char_slot_name(idx):
 # -- Data classes --------------------------------------------------------------
 
 @dataclass
+class PortPlayerInfo:
+    discord_id: int
+    display_name: str  # raw name, no "Px - " prefix
+
+@dataclass
 class CaptureHeader:
     magic: str
     version: int
@@ -197,6 +202,26 @@ class CaptureHeader:
     net_half_width: float = 0.0
     net_height: float = 0.0
     net_depth: float = 0.0
+    # computed
+    header_size: int = 48  # 48 for v7-v10, 273 for v11+
+    # v11+ match metadata
+    epoch: int = 0
+    citrus_game_id: int = 0
+    submitted_by_discord_id: int = 0
+    room_id: int = 0
+    game_count: int = 0
+    is_ranked: bool = False
+    is_netplay: bool = False
+    match_time_allotted: int = 0
+    match_difficulty: int = 0
+    match_items: bool = False
+    match_super_strikes: bool = False
+    match_bowser_or_ftx: bool = False
+    overtime_not_reached: bool = False
+    match_time_elapsed: float = 0.0
+    md5: str = ""  # hex string
+    port_teams: list = field(default_factory=lambda: [0xFF, 0xFF, 0xFF, 0xFF])
+    port_players: list = field(default_factory=lambda: [PortPlayerInfo(0, ""), PortPlayerInfo(0, ""), PortPlayerInfo(0, ""), PortPlayerInfo(0, "")])
 
 @dataclass
 class FrameControllerInput:
@@ -296,8 +321,24 @@ class GameStateFrame:
 
 # -- Parsing -------------------------------------------------------------------
 
-HEADER_FMT = "<4sIII5B3x6f"  # 48 bytes (v7+: 6 geometry floats after match info)
-HEADER_SIZE = struct.calcsize(HEADER_FMT)
+BASE_HEADER_FMT = "<4sIII5B3x6f"  # 48 bytes base (v7+)
+BASE_HEADER_SIZE = struct.calcsize(BASE_HEADER_FMT)  # 48
+V11_HEADER_SIZE = 273  # 48 + 225 (match metadata extension)
+
+# v11 extension format (225 bytes, starting at offset 48):
+# QQQ  = epoch, citrusGameId, submittedByDiscordId  (24 bytes)
+# I    = roomId                                       (4 bytes)
+# H    = gameCount                                    (2 bytes)
+# BB   = isRanked, isNetplay                          (2 bytes)
+# H    = matchTimeAllotted                            (2 bytes)
+# BBBBB = difficulty, items, superStrikes, bowserFTX, overtime (5 bytes)
+# 2x   = matchInfoPadding                             (2 bytes)
+# f    = matchTimeElapsed                             (4 bytes)
+# 16s  = md5                                          (16 bytes)
+# 4B   = portTeam[4]                                  (4 bytes)
+# (portPlayers: 4 x (Q + 32s) = 4 x 40 = 160 bytes)
+V11_META_FMT = "<QQQIHBBHBBBBBxx f16s4B"
+V11_PORT_PLAYER_FMT = "<Q32s"  # 40 bytes each, parse 4 individually
 
 # v5 FrameCharacter: 28 bytes
 # float posX(4) + float posY(4) + float posZ(4) + u32 actionState(4) +
@@ -311,8 +352,8 @@ ITEM_SIZE = 48
 
 
 def parse_header(data: bytes) -> CaptureHeader:
-    vals = struct.unpack_from(HEADER_FMT, data, 0)
-    return CaptureHeader(
+    vals = struct.unpack_from(BASE_HEADER_FMT, data, 0)
+    hdr = CaptureHeader(
         magic=vals[0].decode('ascii'),
         version=vals[1],
         frame_count=vals[2],
@@ -328,7 +369,37 @@ def parse_header(data: bytes) -> CaptureHeader:
         net_half_width=vals[12],
         net_height=vals[13],
         net_depth=vals[14],
+        header_size=BASE_HEADER_SIZE,
     )
+    if vals[1] >= 11 and len(data) >= V11_HEADER_SIZE:
+        hdr.header_size = V11_HEADER_SIZE
+        mv = struct.unpack_from(V11_META_FMT, data, BASE_HEADER_SIZE)
+        hdr.epoch                  = mv[0]
+        hdr.citrus_game_id         = mv[1]
+        hdr.submitted_by_discord_id = mv[2]
+        hdr.room_id                = mv[3]
+        hdr.game_count             = mv[4]
+        hdr.is_ranked              = bool(mv[5])
+        hdr.is_netplay             = bool(mv[6])
+        hdr.match_time_allotted    = mv[7]
+        hdr.match_difficulty       = mv[8]
+        hdr.match_items            = bool(mv[9])
+        hdr.match_super_strikes    = bool(mv[10])
+        hdr.match_bowser_or_ftx    = bool(mv[11])
+        hdr.overtime_not_reached   = bool(mv[12])
+        hdr.match_time_elapsed     = mv[13]
+        hdr.md5                    = mv[14].hex()
+        hdr.port_teams             = list(mv[15:19])
+        # Parse 4 PortPlayerInfo entries (40 bytes each, starting at offset 48+65=113)
+        port_player_base = BASE_HEADER_SIZE + struct.calcsize(V11_META_FMT)
+        hdr.port_players = []
+        for i in range(4):
+            pv = struct.unpack_from(V11_PORT_PLAYER_FMT, data, port_player_base + i * 40)
+            hdr.port_players.append(PortPlayerInfo(
+                discord_id=pv[0],
+                display_name=pv[1].rstrip(b'\x00').decode('utf-8', errors='replace'),
+            ))
+    return hdr
 
 
 def parse_character(data: bytes, offset: int) -> FrameCharacter:
@@ -741,10 +812,21 @@ def main():
     print(f"  Field geometry:")
     print(f"    goalLineX={header.goal_line_x:.1f}  sidelineY={header.sideline_y:.1f}  penaltyBoxX={header.penalty_box_x:.1f}")
     print(f"    net: halfWidth={header.net_half_width:.1f}  height={header.net_height:.1f}  depth={header.net_depth:.1f}")
+    if header.version >= 11:
+        print(f"  Match metadata (v11):")
+        print(f"    epoch={header.epoch}  roomId=0x{header.room_id:08X}  gameCount={header.game_count}")
+        print(f"    citrusGameId=0x{header.citrus_game_id:010X}  submittedBy={header.submitted_by_discord_id}")
+        print(f"    ranked={header.is_ranked}  netplay={header.is_netplay}  items={header.match_items}")
+        print(f"    superStrikes={header.match_super_strikes}  bowserFTX={header.match_bowser_or_ftx}")
+        print(f"    timeAllotted={header.match_time_allotted}s  elapsed={header.match_time_elapsed:.1f}s  difficulty={header.match_difficulty}")
+        print(f"    overtimeNotReached={header.overtime_not_reached}  md5={header.md5}")
+        TEAM_NAMES = {0: "left", 1: "right", 0xFF: "disconnected"}
+        for i, (pt, pp) in enumerate(zip(header.port_teams, header.port_players)):
+            print(f"    Port {i}: team={TEAM_NAMES.get(pt, pt)}  discordId={pp.discord_id}  name='{pp.display_name}'")
 
     # Parse all frames
     frames = []
-    offset = HEADER_SIZE
+    offset = header.header_size
     for i in range(header.frame_count):
         frame, consumed = parse_frame(data, offset, header.fixed_frame_size)
         frames.append(frame)
