@@ -31,6 +31,9 @@
     <ProjectReference Include="$(CoreDir)Common\SCMRevGen.vcxproj">
       <Project>{41279555-f94f-4ebc-99de-af863c10c5c4}</Project>
     </ProjectReference>
+    <ProjectReference Include="$(ExternalsDir)HDiffPatch\HDiffPatch.vcxproj">
+      <Project>{B8F3C2A1-D4E5-4F6A-8B9C-0A1B2C3D4E5F}</Project>
+    </ProjectReference>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="Common\CitrusRequest.h" />

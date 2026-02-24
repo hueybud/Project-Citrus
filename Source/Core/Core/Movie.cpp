@@ -4,11 +4,19 @@
 #include "Core/Movie.h"
 
 #include <filesystem>  // C++17
+#include <fstream>
 #include <iostream>
 namespace fs = std::filesystem;
 #include "unzip.h"
 #include <picojson.h>
 #include <zstd.h>
+
+// Enable LZMA2 decompressor plugin for old-format diffs (created by hdiffz -c-lzma2).
+#define _CompressPlugin_lzma2
+#define _IsNeedIncludeDefaultCompressHead 1
+#include "decompress_plugin_demo.h"
+
+#include "libHDiffPatch/HPatch/patch.h"
 
 #include <algorithm>
 #include <array>
@@ -1612,33 +1620,103 @@ bool PlayInput(const std::string& movie_path, std::optional<std::string>* savest
       INFO_LOG_FMT(CORE, "We did not find a savestate in the CIT");
       // create output.dtm.sav from patch if we did not find it from unzipping
 
-      std::string pathToBatch = (File::GetExeDirectory() + "\\createoutputfromdiff.bat");
-      INFO_LOG_FMT(CORE, "Path to the batch file is {}", pathToBatch);
-      std::string batchPath = "\"\"" + pathToBatch + "\"";
       fs::path incomingCITDirectory = fs::path(movie_path).parent_path();
+      std::string baseSavPath = File::GetExeDirectory() + DIR_SEP + "base.sav";
+      std::string diffFilePath = (incomingCITDirectory / "diffFile.patch").string();
+      std::string outputSavPath = (incomingCITDirectory / "output.dtm.sav").string();
 
-      std::string pathToSaveState = "\"" + incomingCITDirectory.string() + "/output.dtm.sav" + "\"";
-      std::string pathToDiff = "\"" + incomingCITDirectory.string() + "/diffFile.patch" + "\"";
-      std::string pathToEXE = "\"" + File::GetExeDirectory() + "\"";
-      std::string dolphinDriveLetter = (File::GetExeDirectory().substr(0, 1) + ":");
-      batchPath += " " + pathToDiff + " " + pathToSaveState + " " + pathToEXE + " " + dolphinDriveLetter + "\"";
-      INFO_LOG_FMT(CORE, "Batch args for patching the diff is {}", batchPath);
-      STARTUPINFO si;
-      PROCESS_INFORMATION pi;
-      memset(&si, 0, sizeof(si));
-      si.cb = sizeof(si);
-      // si.wShowWindow = SW_HIDE;
-      //  CREATE_NO_WINDOW after true for no window, NULL for a window
-      if (!CreateProcessA(pathToBatch.c_str(), &batchPath[0], NULL, NULL, TRUE, CREATE_NO_WINDOW,
-                          NULL, NULL,
-                          (LPSTARTUPINFOA)&si, &pi))
+      if (File::Exists(diffFilePath) && File::Exists(baseSavPath))
       {
-        // would handle error in here
+        // Read diff file
+        std::ifstream diffStream(diffFilePath, std::ios::binary);
+        std::vector<unsigned char> diffFileData((std::istreambuf_iterator<char>(diffStream)), {});
+        diffStream.close();
+
+        // New format: first 8 bytes are the new data size (u64 LE), rest is HDiffPatch diff.
+        // Old format (hdiffz -c-lzma2): starts with 'H','D','I','F','F' ... (handled on Windows).
+        const bool isNewFormat =
+            diffFileData.size() >= 8 &&
+            !(diffFileData.size() >= 5 && diffFileData[0] == 'H' && diffFileData[1] == 'D' &&
+              diffFileData[2] == 'I' && diffFileData[3] == 'F' && diffFileData[4] == 'F');
+
+        if (isNewFormat)
+        {
+          uint64_t newDataSize = 0;
+          memcpy(&newDataSize, diffFileData.data(), 8);
+
+          if (newDataSize > 0 && newDataSize < 256ULL * 1024 * 1024)
+          {
+            std::ifstream oldStream(baseSavPath, std::ios::binary);
+            std::vector<unsigned char> oldData((std::istreambuf_iterator<char>(oldStream)), {});
+            oldStream.close();
+
+            std::vector<unsigned char> newData(static_cast<size_t>(newDataSize));
+            const unsigned char* diffStart = diffFileData.data() + 8;
+            const unsigned char* diffEnd = diffFileData.data() + diffFileData.size();
+
+            if (patch(newData.data(), newData.data() + newDataSize, oldData.data(),
+                      oldData.data() + oldData.size(), diffStart, diffEnd))
+            {
+              std::ofstream outStream(outputSavPath, std::ios::binary);
+              outStream.write(reinterpret_cast<const char*>(newData.data()),
+                              static_cast<std::streamsize>(newDataSize));
+              outStream.close();
+              INFO_LOG_FMT(CORE, "Applied diff patch via library, wrote {} bytes to {}",
+                           newDataSize, outputSavPath);
+            }
+            else
+            {
+              WARN_LOG_FMT(CORE, "HDiffPatch patch() failed for {}", diffFilePath);
+            }
+          }
+          else
+          {
+            WARN_LOG_FMT(CORE, "Diff file has invalid new data size: {}", newDataSize);
+          }
+        }
+        else
+        {
+          // Old compressed diff format (created by hdiffz -c-lzma2).
+          // Use HDiffPatch's LZMA2 decompressor plugin — works on all platforms.
+          hpatch_compressedDiffInfo diffInfo;
+          const unsigned char* diffBytes = diffFileData.data();
+          const unsigned char* diffBytesEnd = diffBytes + diffFileData.size();
+          if (getCompressedDiffInfo_mem(&diffInfo, diffBytes, diffBytesEnd) &&
+              diffInfo.newDataSize > 0 && diffInfo.newDataSize < 256ULL * 1024 * 1024)
+          {
+            std::ifstream oldStream(baseSavPath, std::ios::binary);
+            std::vector<unsigned char> oldData((std::istreambuf_iterator<char>(oldStream)), {});
+            oldStream.close();
+            std::vector<unsigned char> newData(static_cast<size_t>(diffInfo.newDataSize));
+            if (patch_decompress_mem(newData.data(), newData.data() + diffInfo.newDataSize,
+                                     oldData.data(), oldData.data() + oldData.size(),
+                                     diffBytes, diffBytesEnd, &lzma2DecompressPlugin))
+            {
+              std::ofstream outStream(outputSavPath, std::ios::binary);
+              outStream.write(reinterpret_cast<const char*>(newData.data()),
+                              static_cast<std::streamsize>(diffInfo.newDataSize));
+              outStream.close();
+              INFO_LOG_FMT(CORE, "Applied old lzma2 diff via library: {} bytes output",
+                           diffInfo.newDataSize);
+            }
+            else
+            {
+              WARN_LOG_FMT(CORE, "LZMA2 patch_decompress_mem failed for {}", diffFilePath);
+            }
+          }
+          else
+          {
+            WARN_LOG_FMT(CORE, "Failed to read compressed diff info from {}", diffFilePath);
+          }
+        }
       }
-      WaitForSingleObject(pi.hProcess, INFINITE);
-      // the task has ended so close the handle
-      CloseHandle(pi.hThread);
-      CloseHandle(pi.hProcess);
+      else
+      {
+        if (!File::Exists(baseSavPath))
+          WARN_LOG_FMT(CORE, "Cannot apply diff: base.sav not found at {}", baseSavPath);
+        else
+          WARN_LOG_FMT(CORE, "Cannot apply diff: diffFile.patch not found at {}", diffFilePath);
+      }
     }
   }
 

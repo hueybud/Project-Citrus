@@ -1,4 +1,6 @@
 add_library(common
+  CitrusRequest.cpp
+  CitrusRequest.h
   Analytics.cpp
   Analytics.h
   Assert.h

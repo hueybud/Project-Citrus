@@ -406,6 +406,14 @@ add_library(core
   LibusbUtils.h
   MemTools.cpp
   MemTools.h
+  CitrusUser.cpp
+  CitrusUser.h
+  DefaultGeckoCodes.cpp
+  DefaultGeckoCodes.h
+  GameStateFrame.cpp
+  GameStateFrame.h
+  Metadata.cpp
+  Metadata.h
   Movie.cpp
   Movie.h
   NetPlayClient.cpp
@@ -418,6 +426,8 @@ add_library(core
   NetworkCaptureLogger.h
   PatchEngine.cpp
   PatchEngine.h
+  StateAuxillary.cpp
+  StateAuxillary.h
   PowerPC/BreakPoints.cpp
   PowerPC/BreakPoints.h
   PowerPC/CachedInterpreter/CachedInterpreter.cpp
@@ -583,6 +593,7 @@ PUBLIC
 PRIVATE
   fmt::fmt
   ${LZO}
+  HDiffPatch::HDiffPatch
   ZLIB::ZLIB
 )
 

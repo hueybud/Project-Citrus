@@ -3,7 +3,6 @@
 #include <Core/HW/Memmap.h>
 #include <Core/HW/AddressSpace.h>
 #include <../minizip/mz_compat.h>
-#include <codecvt>
 #include "zip.h"
 #include "Common/CommonPaths.h"
 #include "Common/FileUtil.h"
@@ -13,6 +12,12 @@
 #include <Common/IOFile.h>
 #include "Core.h"
 #include <VideoCommon/OnScreenDisplay.h>
+
+#include "libHDiffPatch/HDiff/diff.h"
+
+#include <cstdint>
+#include <filesystem>
+#include <fstream>
 
 struct ItemStruct
 {
@@ -497,72 +502,60 @@ void Metadata::writeJSON(std::string jsonString, bool callBatch)
     std::ostream_iterator<unsigned char> output_iterator(output_file);
     std::copy(out.begin(), out.end(), output_iterator);
     */
-    #ifdef _WIN32
-    std::filesystem::path cwd = File::GetExeDirectory() + "\\" + "creatediff.bat";
-    std::string pathToBatch = cwd.string();
-    std::string batchPath = "\"\"" + pathToBatch + "\"";
-    std::string pathToSaveState =
-        "\"" + File::GetUserPath(D_CITRUSREPLAYS_IDX) + "output.dtm.sav" + "\"";
-    std::string pathToDiff =
-        "\"" + File::GetUserPath(D_CITRUSREPLAYS_IDX) + "diffFile.patch" + "\"";
-    std::string pathToDirectory = "\"" + File::GetExeDirectory() + "\"";
-    batchPath += " " + pathToSaveState + " " + pathToDiff + " " + pathToDirectory + "\"";
-    STARTUPINFO si;
-    PROCESS_INFORMATION pi;
-    memset(&si, 0, sizeof(si));
-    si.cb = sizeof(si);
-    //si.wShowWindow = SW_HIDE;
-    // CREATE_NO_WINDOW after true
-    INFO_LOG_FMT(CORE, "Path {}, {}", pathToBatch, batchPath);
+    // Create a binary diff between base.sav (the reference savestate shipped with Dolphin)
+    // and output.dtm.sav (the current match's savestate) using the HDiffPatch library.
+    // The diff is stored with an 8-byte little-endian new-data-size prefix followed by
+    // the raw HDiffPatch uncompressed diff data. The zip file itself provides compression.
+    {
+      std::string baseSavPath = File::GetExeDirectory() + DIR_SEP + "base.sav";
+      std::string newSavPath = File::GetUserPath(D_CITRUSREPLAYS_IDX) + "output.dtm.sav";
+      std::string diffPath = File::GetUserPath(D_CITRUSREPLAYS_IDX) + "diffFile.patch";
 
-    if (!CreateProcessA(pathToBatch.c_str(), &batchPath[0], NULL, NULL, TRUE, CREATE_NO_WINDOW,
-                        NULL,
-                   NULL, (LPSTARTUPINFOA)&si, &pi))
-    {
-      // would handle error in here
+      if (File::Exists(baseSavPath) && File::Exists(newSavPath))
+      {
+        std::ifstream oldFile(baseSavPath, std::ios::binary);
+        std::vector<unsigned char> oldData((std::istreambuf_iterator<char>(oldFile)), {});
+        oldFile.close();
+
+        std::ifstream newFile(newSavPath, std::ios::binary);
+        std::vector<unsigned char> newData((std::istreambuf_iterator<char>(newFile)), {});
+        newFile.close();
+
+        std::vector<unsigned char> diffData;
+        create_diff(newData.data(), newData.data() + newData.size(), oldData.data(),
+                    oldData.data() + oldData.size(), diffData);
+
+        // Write: [8 bytes: new data size (u64 LE)] + [HDiffPatch diff bytes]
+        std::ofstream diffFile(diffPath, std::ios::binary);
+        uint64_t newDataSize = static_cast<uint64_t>(newData.size());
+        diffFile.write(reinterpret_cast<const char*>(&newDataSize), 8);
+        diffFile.write(reinterpret_cast<const char*>(diffData.data()),
+                       static_cast<std::streamsize>(diffData.size()));
+        diffFile.close();
+        INFO_LOG_FMT(CORE, "Created diff: {} bytes old, {} bytes new, {} bytes diff",
+                     oldData.size(), newData.size(), diffData.size());
+      }
+      else
+      {
+        INFO_LOG_FMT(CORE, "Skipping diff creation: base.sav not found at {}", baseSavPath);
+      }
     }
-    WaitForSingleObject(pi.hProcess, INFINITE);
-    // the task has ended so close the handle
-    CloseHandle(pi.hThread);
-    CloseHandle(pi.hProcess);
-    #endif
-    //WinExec(batchPath.c_str(), SW_HIDE);
     // https://stackoverflow.com/questions/11370908/how-do-i-use-minizip-on-zlib
-    std::vector<std::wstring> paths;
+    std::vector<std::string> paths;
     std::string exampleFile1 = File::GetUserPath(D_CITRUSREPLAYS_IDX) + "output.dtm.sav";
-    for (char& c : exampleFile1)
-    {
-      if (c == '/')
-        c = '\\';
-    }
     std::string exampleFile2 = File::GetUserPath(D_CITRUSREPLAYS_IDX) + "output.dtm";
-    for (char& c : exampleFile2)
-    {
-      if (c == '/')
-        c = '\\';
-    }
     std::string exampleFile3 = File::GetUserPath(D_CITRUSREPLAYS_IDX) + "output.json";
-    for (char& c : exampleFile3)
-    {
-      if (c == '/')
-        c = '\\';
-    }
     std::string exampleFile4 = File::GetUserPath(D_CITRUSREPLAYS_IDX) + "diffFile.patch";
-    for (char& c : exampleFile4)
-    {
-      if (c == '/')
-        c = '\\';
-    }
-    
-    paths.push_back(std::wstring_convert<std::codecvt_utf8<wchar_t>>().from_bytes(exampleFile2));
-    paths.push_back(std::wstring_convert<std::codecvt_utf8<wchar_t>>().from_bytes(exampleFile3));
+
+    paths.push_back(exampleFile2);
+    paths.push_back(exampleFile3);
     if (File::Exists(exampleFile4))
     {
-      paths.push_back(std::wstring_convert<std::codecvt_utf8<wchar_t>>().from_bytes(exampleFile4));
+      paths.push_back(exampleFile4);
     }
     else
     {
-      paths.push_back(std::wstring_convert<std::codecvt_utf8<wchar_t>>().from_bytes(exampleFile1));
+      paths.push_back(exampleFile1);
     }
     std::string zipName = File::GetUserPath(D_CITRUSREPLAYS_IDX) + gameTime + ".cit ";
 
@@ -583,11 +576,10 @@ void Metadata::writeJSON(std::string jsonString, bool callBatch)
         if (size == 0 || file.read(&buffer[0], size))
         {
           zip_fileinfo zfi = {0};
-          std::wstring fileName = paths[i].substr(paths[i].rfind('\\') + 1);
+          std::string fileName = std::filesystem::path(paths[i]).filename().string();
 
-          if (ZIP_OK == zipOpenNewFileInZip(zf, std::string(fileName.begin(), fileName.end()).c_str(),
-                                          &zfi, NULL, 0, NULL, 0, NULL, Z_DEFLATED,
-                                          -1))
+          if (ZIP_OK == zipOpenNewFileInZip(zf, fileName.c_str(), &zfi, NULL, 0, NULL, 0, NULL,
+                                           Z_DEFLATED, -1))
           {
             if (zipWriteInFileInZip(zf, size == 0 ? "" : &buffer[0], size))
               _return = false;

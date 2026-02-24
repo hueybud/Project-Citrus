@@ -13,3 +13,9 @@
 	url = https://github.com/dolphin-emu/ext-win-ffmpeg.git
 	branch = master
 	shallow = true
+[submodule "Externals/HDiffPatch"]
+	path = Externals/HDiffPatch
+	url = https://github.com/sisong/HDiffPatch.git
+[submodule "Externals/lzma"]
+	path = Externals/lzma
+	url = https://github.com/sisong/lzma.git
