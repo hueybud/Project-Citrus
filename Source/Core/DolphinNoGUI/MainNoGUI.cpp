@@ -23,6 +23,7 @@
 #include "Core/Core.h"
 #include "Core/DolphinAnalytics.h"
 #include "Core/Host.h"
+#include "Core/Movie.h"
 
 #include "UICommon/CommandLineParse.h"
 #ifdef USE_DISCORD_PRESENCE
@@ -186,6 +187,11 @@ int main(int argc, char* argv[])
     save_state_path = static_cast<const char*>(options.get("save_state"));
   }
 
+  // Stash movie path; PlayInput() must be called after UICommon::Init().
+  std::string movie_path;
+  if (options.is_set("movie"))
+    movie_path = static_cast<const char*>(options.get("movie"));
+
   std::unique_ptr<BootParameters> boot;
   bool game_specified = false;
   if (options.is_set("exec"))
@@ -262,6 +268,19 @@ int main(int argc, char* argv[])
 #endif
 
   DolphinAnalytics::Instance().ReportDolphinStart("nogui");
+
+  if (!movie_path.empty())
+  {
+    std::optional<std::string> movie_savestate;
+    if (!Movie::PlayInput(movie_path, &movie_savestate))
+    {
+      fprintf(stderr, "Failed to begin movie playback from: %s\n", movie_path.c_str());
+      return 1;
+    }
+    // If the movie file carries a savestate, apply it to the boot params now.
+    if (movie_savestate)
+      boot->boot_session_data.SetSavestateData(std::move(movie_savestate), DeleteSavestateAfterBoot::No);
+  }
 
   if (!BootManager::BootCore(std::move(boot), s_platform->GetWindowSystemInfo()))
   {
