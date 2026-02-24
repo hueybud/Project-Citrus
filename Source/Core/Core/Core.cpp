@@ -505,8 +505,10 @@ void OnFrameEnd()
     if (GameStateCapture::IsCapturing())
     {
       std::string cit_stem = Movie::GetCITStemName();
+      std::string cit_dir  = Movie::GetCITDirPath();
       std::string basename = cit_stem.empty() ? "output" : cit_stem;
-      std::string output_path = File::GetUserPath(D_CITRUSREPLAYS_IDX) + basename + ".citframes";
+      std::string dir = cit_dir.empty() ? File::GetUserPath(D_CITRUSREPLAYS_IDX) : (cit_dir + "/");
+      std::string output_path = dir + basename + ".citframes";
       GameStateCapture::EndCapture(output_path);
     }
 

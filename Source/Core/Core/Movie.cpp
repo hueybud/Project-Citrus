@@ -140,6 +140,7 @@ static std::vector<CITFFrameInputs> s_citf_inputs;  // CITF frames (indexed by c
 static bool s_use_citf_inputs = false;               // True if playing back from CITF instead of DTM
 static std::string s_citf_file_path;                 // Path to .citframes file if found
 static std::string s_cit_stem_name;                  // Stem of the .cit file being played (e.g. "game1")
+static std::string s_cit_dir_path;                   // Parent directory of the .cit file being played
 
 // s_InputDisplay is used by both CPU and GPU (is mutable).
 static std::mutex s_input_display_lock;
@@ -395,6 +396,11 @@ u64 GetCurrentInputCount()
 std::string GetCITStemName()
 {
   return s_cit_stem_name;
+}
+
+std::string GetCITDirPath()
+{
+  return s_cit_dir_path;
 }
 
 const GCPadStatus* GetCITFInput(int controller, u64 inputCount)
@@ -1435,6 +1441,7 @@ bool PlayInput(const std::string& movie_path, std::optional<std::string>* savest
   if (temp_movie_path.extension() == ".cit")
   {
     s_cit_stem_name = temp_movie_path.stem().string();
+    s_cit_dir_path  = temp_movie_path.parent_path().string();
     // unzip and store the cit file path to movie_path
     unzFile zipfile = unzOpen(movie_path.c_str());
     if (zipfile == NULL)
@@ -1655,6 +1662,9 @@ bool PlayInput(const std::string& movie_path, std::optional<std::string>* savest
   s_currentInputCount = 0;
 
   s_playMode = PlayMode::Playing;
+
+  // Suppress panic alert dialogs during movie playback so batch conversion isn't interrupted
+  Common::SetEnableAlert(false);
 
   // Wiimotes cause desync issues if they're not reset before launching the game
   Wiimote::ResetAllWiimotes();
@@ -2107,6 +2117,7 @@ void EndPlayInput(bool cont)
     ASSERT(IsMovieActive());
 
     s_playMode = PlayMode::Recording;
+    Common::SetEnableAlert(Config::Get(Config::MAIN_USE_PANIC_HANDLERS));
     Core::DisplayMessage("Reached movie end. Resuming recording.", 2000);
   }
   else if (s_playMode != PlayMode::None)
@@ -2132,6 +2143,7 @@ void EndPlayInput(bool cont)
       StateAuxillary::setPostPort();
     }
     s_playMode = PlayMode::None;
+    Common::SetEnableAlert(Config::Get(Config::MAIN_USE_PANIC_HANDLERS));
     Core::DisplayMessage("Movie End.", 2000);
     s_bRecordingFromSaveState = false;
     // we don't clear these things because otherwise we can't resume playback if we load a movie

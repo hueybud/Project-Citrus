@@ -160,6 +160,8 @@ u64 GetTotalLagCount();
 
 // Get the stem name of the .cit file currently being played (e.g. "game1" from "game1.cit")
 std::string GetCITStemName();
+// Get the parent directory of the .cit file currently being played
+std::string GetCITDirPath();
 
 // Get CITF frame data for a specific inputCount (returns nullptr if not found)
 const GCPadStatus* GetCITFInput(int controller, u64 inputCount);
