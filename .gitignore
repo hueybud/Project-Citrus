@@ -49,3 +49,8 @@ CMakeLists.txt.user
 /.claude/
 /CLAUDE.md
 /nul
+/Models/
+/NotesAboutNewDeterministicReplaySystem.txt
+/customdeterministicnotes.txt
+/Tools/__pycache__/
+/Tools/citf_analysis.txt

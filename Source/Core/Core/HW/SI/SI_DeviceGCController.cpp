@@ -140,6 +140,8 @@ void CSIDevice_GCController::HandleMoviePadStatus(int device_number, GCPadStatus
   }
   else if (Movie::IsRecordingInput())
   {
+    // Apply AI override before recording so AI inputs are what gets captured.
+    Movie::PlayController(pad_status, device_number);
     Movie::RecordInput(pad_status, device_number);
 
     // Capture BEFORE InputUpdate so inputCount matches the DTM input index
@@ -152,6 +154,9 @@ void CSIDevice_GCController::HandleMoviePadStatus(int device_number, GCPadStatus
   }
   else
   {
+    // Normal gameplay (no movie playing/recording).
+    // Let the AI override the physical controller if active.
+    Movie::PlayController(pad_status, device_number);
     Movie::CheckPadStatus(pad_status, device_number);
   }
 }

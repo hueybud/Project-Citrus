@@ -209,6 +209,17 @@ std::string GetInputDisplay();
 std::string GetRTCDisplay();
 std::string GetRerecords();
 
+// AI controller — load an ONNX model to drive a GC port each frame.
+// Call from game boot (same site as CITF loading) when AIModelPath INI key is set.
+// controlled_port: GC port index (0-3).
+// mirror_x: true if the AI's team attacks left (RIGHT team) — X coords are negated
+//           so the model always sees the canonical "attacks right" view.
+void InitAIController(const std::string& onnx_path, int controlled_port, bool mirror_x);
+void ShutdownAIController();
+bool IsUsingAIInputs();
+// Called once per rendered frame from Core::OnFrameEnd() — runs ONNX inference.
+void TickAIController();
+
 // Done this way to avoid mixing of core and gui code
 using GCManipFunction = std::function<void(GCPadStatus*, int)>;
 using WiiManipFunction = std::function<void(WiimoteCommon::DataReportBuilder&, int, int,

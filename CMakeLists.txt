@@ -699,6 +699,9 @@ endif()
 message(STATUS "Using static HDiffPatch from Externals")
 add_subdirectory(Externals/HDiffPatch)
 
+message(STATUS "Using prebuilt ONNX Runtime from Externals")
+add_subdirectory(Externals/onnxruntime)
+
 if(NOT APPLE)
   check_lib(LZO "(no .pc for lzo2)" lzo2 lzo/lzo1x.h QUIET)
 endif()

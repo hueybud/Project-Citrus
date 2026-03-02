@@ -189,6 +189,10 @@ void OnFrameEnd()
     GameStateCapture::CaptureFrame();
   }
 
+  // Run AI inference for this frame (reads GC memory, runs ONNX model, caches output).
+  // PlayController() will deliver the cached result to the controlled port's SI poll.
+  Movie::TickAIController();
+
   /*
   if (Movie::IsPlayingInput() || isPlayback)
   {

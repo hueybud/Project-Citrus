@@ -59,6 +59,7 @@ namespace fs = std::filesystem;
 #include "Core/ConfigManager.h"
 #include "Core/Core.h"
 #include "Core/CoreTiming.h"
+#include "Core/AIController.h"
 #include "Core/GameStateFrame.h"
 #include "Core/DSP/DSPCore.h"
 #include "Core/HW/CPU.h"
@@ -156,6 +157,14 @@ static bool s_use_citf_inputs = false;               // True if playing back fro
 static std::string s_citf_file_path;                 // Path to .citframes file if found
 static std::string s_cit_stem_name;                  // Stem of the .cit file being played (e.g. "game1")
 static std::string s_cit_dir_path;                   // Parent directory of the .cit file being played
+
+// AI controller — optional ONNX-driven input source.
+// When loaded, OnFrameEnd() is called each frame and its output is fed through
+// PlayController() in place of DTM/CITF data.
+static std::unique_ptr<AIController> s_ai_controller;
+static bool s_use_ai_inputs       = false;
+static int  s_ai_controlled_port  = 0;
+static bool s_ai_mirror_x         = false;
 
 // s_InputDisplay is used by both CPU and GPU (is mutable).
 static std::mutex s_input_display_lock;
@@ -323,6 +332,19 @@ void Init(const BootParameters& boot)
     s_currentFrame = 0;
     s_currentLagCount = 0;
     s_currentInputCount = 0;
+  }
+
+  // AI Controller: initialize from INI at every game boot so the model works
+  // without needing a movie file to be playing.
+  {
+    std::string ai_model_path = Config::Get(Config::MAIN_MOVIE_AI_MODEL_PATH);
+    INFO_LOG_FMT(CORE, "Movie::Init — AIModelPath='{}'", ai_model_path);
+    if (!ai_model_path.empty())
+    {
+      int ai_port      = Config::Get(Config::MAIN_MOVIE_AI_CONTROLLED_PORT);
+      bool ai_mirror_x = Config::Get(Config::MAIN_MOVIE_AI_MIRROR_X);
+      InitAIController(ai_model_path, ai_port, ai_mirror_x);
+    }
   }
 }
 
@@ -1626,6 +1648,18 @@ bool PlayInput(const std::string& movie_path, std::optional<std::string>* savest
       }
     }
 
+    // Load AI controller from INI config if a model path is configured.
+    // The AI overrides inputs for the configured port each frame via PlayController().
+    {
+      std::string ai_model_path = Config::Get(Config::MAIN_MOVIE_AI_MODEL_PATH);
+      if (!ai_model_path.empty())
+      {
+        int  ai_port     = Config::Get(Config::MAIN_MOVIE_AI_CONTROLLED_PORT);
+        bool ai_mirror_x = Config::Get(Config::MAIN_MOVIE_AI_MIRROR_X);
+        InitAIController(ai_model_path, ai_port, ai_mirror_x);
+      }
+    }
+
     if (!boolFoundOutputSav)
     {
       INFO_LOG_FMT(CORE, "We did not find a savestate in the CIT");
@@ -1973,6 +2007,34 @@ static void CheckInputEnd()
 // NOTE: CPU Thread
 void PlayController(GCPadStatus* PadStatus, int controllerID)
 {
+  // AI Controller Mode: override inputs only during active match play (gamePhase 4/5).
+  // OnFrameEnd() sets IsMatchActive() true only when inference ran successfully.
+  // During menus / goal celebrations this is false and we fall through to normal input.
+  static int s_ai_log_counter = 0;
+  if (s_use_ai_inputs && s_ai_controller && !IsPlayingInput())
+  {
+    bool loaded   = s_ai_controller->IsLoaded();
+    bool active   = s_ai_controller->IsMatchActive();
+    bool port_ok  = (controllerID == s_ai_controlled_port);
+    if (++s_ai_log_counter % 120 == 1)
+    {
+      INFO_LOG_FMT(CORE, "PlayController AI check: port={} loaded={} active={} port_ok={}",
+                   controllerID, loaded, active, port_ok);
+    }
+    if (loaded && active && port_ok)
+    {
+      GCPadStatus out = s_ai_controller->GetLastOutput();
+      if (s_ai_log_counter % 120 == 1)
+      {
+        INFO_LOG_FMT(CORE, "PlayController AI output: btn=0x{:04X} stickX={} stickY={}",
+                     out.button, out.stickX, out.stickY);
+      }
+      *PadStatus = out;
+      s_last_pad_status[controllerID] = *PadStatus;
+      return;
+    }
+  }
+
   // Correct playback is entirely dependent on the emulator polling the controllers
   // in the same order done during recording
   if (!IsPlayingInput() || !IsUsingPad(controllerID))
@@ -2226,6 +2288,10 @@ void EndPlayInput(bool cont)
       s_citf_inputs.clear();
       s_citf_file_path.clear();
     }
+
+    // Note: AI controller is intentionally NOT shut down here — it persists across
+    // matches so back-to-back games don't reload the model. ShutdownAIController()
+    // is called explicitly from Shutdown() or when the user disables it.
 
     if (s_playMode == PlayMode::Playing)
     {
@@ -2545,11 +2611,64 @@ void Shutdown()
   s_citf_inputs.clear();
   s_citf_file_path.clear();
 
+  // Clean up AI controller
+  if (s_ai_controller)
+  {
+    s_ai_controller->Shutdown();
+    s_ai_controller.reset();
+  }
+  s_use_ai_inputs = false;
+
   // shutdown is called any time the game (core) is closed
   // delete any residue from shutting down a playback early that wasn't handled from graceful movie end
   std::thread t1(&StateAuxillary::endPlayback);
   t1.detach();
-
-
 }
+
+void TickAIController()
+{
+  if (s_use_ai_inputs && s_ai_controller && s_ai_controller->IsLoaded())
+    s_ai_controller->OnFrameEnd(s_ai_controlled_port, s_ai_mirror_x);
+}
+
+void InitAIController(const std::string& onnx_path, int controlled_port, bool mirror_x)
+{
+  if (onnx_path.empty())
+    return;
+
+  INFO_LOG_FMT(CORE, "AIController: initializing path='{}' port={} mirror={}", onnx_path,
+               controlled_port, mirror_x);
+
+  s_ai_controller = std::make_unique<AIController>();
+  if (!s_ai_controller->Load(onnx_path))
+  {
+    ERROR_LOG_FMT(CORE, "AIController: failed to load model from {}", onnx_path);
+    s_ai_controller.reset();
+    s_use_ai_inputs = false;
+    return;
+  }
+
+  s_ai_controlled_port = std::max(0, std::min(3, controlled_port));
+  s_ai_mirror_x        = mirror_x;
+  s_use_ai_inputs      = true;
+
+  INFO_LOG_FMT(CORE, "AIController: active on port {} mirror_x={} model={}",
+               s_ai_controlled_port, s_ai_mirror_x, onnx_path);
+}
+
+void ShutdownAIController()
+{
+  if (s_ai_controller)
+  {
+    s_ai_controller->Shutdown();
+    s_ai_controller.reset();
+  }
+  s_use_ai_inputs = false;
+}
+
+bool IsUsingAIInputs()
+{
+  return s_use_ai_inputs && s_ai_controller && s_ai_controller->IsLoaded();
+}
+
 }  // namespace Movie

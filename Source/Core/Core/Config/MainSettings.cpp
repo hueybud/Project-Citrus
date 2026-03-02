@@ -439,6 +439,9 @@ const Info<bool> MAIN_MOVIE_SHOW_INPUT_DISPLAY{{System::Main, "Movie", "ShowInpu
 const Info<bool> MAIN_MOVIE_SHOW_RTC{{System::Main, "Movie", "ShowRTC"}, false};
 const Info<bool> MAIN_MOVIE_SHOW_RERECORD{{System::Main, "Movie", "ShowRerecord"}, false};
 const Info<bool> MAIN_MOVIE_USE_NULL_BACKEND{{System::Main, "Movie", "UseNullBackend"}, false};
+const Info<std::string> MAIN_MOVIE_AI_MODEL_PATH{{System::Main, "Movie", "AIModelPath"}, ""};
+const Info<int> MAIN_MOVIE_AI_CONTROLLED_PORT{{System::Main, "Movie", "AIControlledPort"}, 0};
+const Info<bool> MAIN_MOVIE_AI_MIRROR_X{{System::Main, "Movie", "AIMirrorX"}, false};
 
 // Main.Input
 

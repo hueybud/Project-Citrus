@@ -76,7 +76,7 @@ MAX_CONCURRENT        = 3    # simultaneous Dolphin instances
 STARTUP_WAIT_SECS     = 15   # flat wait before first memory check
 STARTUP_TIMEOUT_SECS  = 90   # total seconds allowed for game to reach running state
 MATCH_TIMEOUT_SECS    = 300  # floor for match timeout (used when time_elapsed is missing)
-MATCH_TIMEOUT_BUFFER_SECS = 30   # buffer added on top of time_elapsed for dynamic timeout
+MATCH_TIMEOUT_BUFFER_SECS = 120  # buffer added on top of time_elapsed for dynamic timeout
 POST_END_WAIT_SECS    = 10   # seconds after match-end flag before verifying CITF on disk
 POLL_INTERVAL_SECS    = 2    # match-end polling frequency
 
@@ -356,7 +356,8 @@ class JobTracker:
             }
             self._save()
 
-    def mark_success(self, cit_name: str, citf_path: str, citf_bytes: int) -> None:
+    def mark_success(self, cit_name: str, citf_path: str, citf_bytes: int,
+                     match_info: Optional[Dict] = None) -> None:
         with self._lock:
             job = self._state["jobs"].setdefault(cit_name, {})
             job.update({
@@ -366,6 +367,8 @@ class JobTracker:
                 "citf_bytes":   citf_bytes,
                 "error":        None,
             })
+            if match_info:
+                job["match_info"] = match_info
             self._save()
 
     def mark_failed(self, cit_name: str, reason: str) -> None:
@@ -821,6 +824,104 @@ def validate_citf_goals(citf_path: Path, json_goal_times: List[float],
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# CITF header parsing — captain/sidekick/stadium extraction
+# ──────────────────────────────────────────────────────────────────────────────
+
+_CAPTAIN_NAMES = {
+    0: "Daisy", 1: "DK", 2: "Luigi", 3: "Mario",
+    4: "Peach", 5: "Waluigi", 6: "Wario", 7: "Yoshi", 8: "SuperTeam",
+}
+_SIDEKICK_NAMES = {
+    0: "Toad", 1: "Koopa", 2: "HammerBro", 3: "Birdo", 8: "SuperTeam",
+}
+_STADIUM_NAMES = {
+    0: "Pipeline", 1: "Palace", 2: "Konga", 3: "Underground",
+    4: "Crater", 5: "Bowser", 6: "BattleDome",
+}
+
+_CITF_HEADER_SIZE = 273  # v11 packed header size
+
+
+def read_citf_match_info(citf_path: Path) -> Optional[Dict]:
+    """
+    Read the first 273 bytes of a CITF (decompressing if zstd) and return a
+    dict with captain, sidekick, and stadium names from the submitter's side.
+
+    Returns None on any error so callers can proceed without crashing.
+
+    Offsets (all little-endian, #pragma pack(push,1)):
+      16 leftCaptainID, 17 rightCaptainID, 18 leftSidekickID, 19 rightSidekickID
+      20 stadiumID
+      64 submittedByDiscordId (u64)
+     109 portTeam[4]
+     113 portPlayers[4 x 40] = { discordId(u64), displayName[32] }
+    """
+    try:
+        with open(citf_path, "rb") as fh:
+            magic = fh.read(4)
+
+        if magic == ZSTD_MAGIC:
+            if not _ZSTD_AVAILABLE:
+                return None
+            dctx = _zstd.ZstdDecompressor()
+            with open(citf_path, "rb") as fh:
+                compressed = fh.read()
+            raw = dctx.stream_reader(compressed).read(_CITF_HEADER_SIZE)
+        else:
+            with open(citf_path, "rb") as fh:
+                raw = fh.read(_CITF_HEADER_SIZE)
+
+        if len(raw) < _CITF_HEADER_SIZE or raw[0:4] != b"CITF":
+            return None
+
+        version = struct.unpack_from("<I", raw, 4)[0]
+        if version < 11:
+            return None
+
+        left_captain   = raw[16]
+        right_captain  = raw[17]
+        left_sidekick  = raw[18]
+        right_sidekick = raw[19]
+        stadium        = raw[20]
+
+        submitted_id = struct.unpack_from("<Q", raw, 64)[0]
+        port_teams   = list(raw[109:113])
+
+        # Find which port belongs to the submitter, then their team side
+        side: Optional[int] = None
+        for i in range(4):
+            offset = 113 + i * 40
+            did = struct.unpack_from("<Q", raw, offset)[0]
+            if did == submitted_id:
+                t = port_teams[i] if i < len(port_teams) else 0xFF
+                if t in (0, 1):
+                    side = t
+                break
+
+        if side == 0:
+            captain  = _CAPTAIN_NAMES.get(left_captain,  f"Unknown({left_captain})")
+            sidekick = _SIDEKICK_NAMES.get(left_sidekick, f"Unknown({left_sidekick})")
+        elif side == 1:
+            captain  = _CAPTAIN_NAMES.get(right_captain,  f"Unknown({right_captain})")
+            sidekick = _SIDEKICK_NAMES.get(right_sidekick, f"Unknown({right_sidekick})")
+        else:
+            # Side unknown — still record raw IDs
+            captain  = _CAPTAIN_NAMES.get(left_captain,  f"Unknown({left_captain})")
+            sidekick = _SIDEKICK_NAMES.get(left_sidekick, f"Unknown({left_sidekick})")
+
+        return {
+            "captain":         captain,
+            "sidekick":        sidekick,
+            "stadium":         _STADIUM_NAMES.get(stadium, f"Unknown({stadium})"),
+            "submitter_side":  "left" if side == 0 else ("right" if side == 1 else "unknown"),
+        }
+
+    except Exception as exc:
+        log.debug("read_citf_match_info failed for %s: %s", citf_path.name, exc)
+        return None
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # Single CIT conversion worker
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -1117,8 +1218,13 @@ def convert_one_cit(
         return False
 
     size = expected_citf.stat().st_size
+    match_info = read_citf_match_info(expected_citf)
+    if match_info:
+        log.info("[%s] Match info: captain=%s sidekick=%s stadium=%s (submitter side=%s)",
+                 stem, match_info["captain"], match_info["sidekick"],
+                 match_info["stadium"], match_info["submitter_side"])
     log.info("[%s] SUCCESS — %s — %s", stem, expected_citf.name, msg)
-    tracker.mark_success(cit_name, str(expected_citf), size)
+    tracker.mark_success(cit_name, str(expected_citf), size, match_info=match_info)
     return True
 
 

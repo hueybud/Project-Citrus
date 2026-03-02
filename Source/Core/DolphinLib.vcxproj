@@ -37,6 +37,7 @@
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="Common\CitrusRequest.h" />
+    <ClInclude Include="Core\AIController.h" />
     <ClInclude Include="Core\CitrusUser.h" />
     <ClInclude Include="Core\DefaultGeckoCodes.h" />
     <ClInclude Include="Core\GameStateFrame.h" />
@@ -45,6 +46,7 @@
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="Common\CitrusRequest.cpp" />
+    <ClCompile Include="Core\AIController.cpp" />
     <ClCompile Include="Core\CitrusUser.cpp" />
     <ClCompile Include="Core\DefaultGeckoCodes.cpp" />
     <ClCompile Include="Core\GameStateFrame.cpp" />

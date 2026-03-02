@@ -406,6 +406,8 @@ add_library(core
   LibusbUtils.h
   MemTools.cpp
   MemTools.h
+  AIController.cpp
+  AIController.h
   CitrusUser.cpp
   CitrusUser.h
   DefaultGeckoCodes.cpp
@@ -594,6 +596,7 @@ PRIVATE
   fmt::fmt
   ${LZO}
   HDiffPatch::HDiffPatch
+  onnxruntime::onnxruntime
   ZLIB::ZLIB
 )
 
