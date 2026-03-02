@@ -5,6 +5,7 @@ on:
     branches: [master, linux-compat]
     paths:
       - 'Dockerfile'
+      - '.gitmodules'
       - 'Source/**'
       - 'Externals/**'
       - 'Tools/convert_cits.py'
