@@ -95,10 +95,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libpng16-16 \
     libvulkan1 \
     python3 \
-    python3-pip \
+    python3-zstandard \
   && rm -rf /var/lib/apt/lists/*
-
-RUN pip3 install --no-cache-dir zstandard
 
 # ── Dolphin binary + game data ────────────────────────────────────────────────
 # Binary is placed in /opt/dolphin/.  With LINUX_LOCAL_DEV, Dolphin looks for
