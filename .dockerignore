@@ -1,0 +1,35 @@
+# Git internals — not needed for the build
+.git
+
+# Windows build output
+Binary/
+
+# Visual Studio / IDE artifacts
+.vs/
+*.user
+*.suo
+*.sdf
+*.opensdf
+*.VC.db
+*.VC.VC.opendb
+IPCLog/
+
+# CMake / build directories
+build/
+build-*/
+CMakeFiles/
+CMakeCache.txt
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Windows-only ORT binaries — not needed on Linux (downloaded fresh in the builder stage)
+Externals/onnxruntime/win-x64/
+
+# Android build output
+Source/Android/app/build/
+
+# macOS
+.DS_Store

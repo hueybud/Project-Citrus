@@ -1,0 +1,61 @@
+name: Build & Push Docker Image
+
+on:
+  push:
+    branches: [master, linux-compat]
+    paths:
+      - 'Dockerfile'
+      - 'Source/**'
+      - 'Externals/**'
+      - 'Tools/convert_cits.py'
+      - '.github/workflows/docker-build.yml'
+  workflow_dispatch:  # allow manual trigger from the Actions tab
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository_owner }}/citrus-converter
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      packages: write  # needed to push to GHCR
+
+    steps:
+      - name: Checkout (with submodules)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract image metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            # Tag as "latest" only on master
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/master' }}
+            # Tag with the branch name on all other branches (e.g. "linux-compat")
+            type=ref,event=branch
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

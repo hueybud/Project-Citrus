@@ -22,7 +22,6 @@ Dependencies (pip install as needed):
 
 import argparse
 import ctypes
-import ctypes.wintypes as wintypes
 import json
 import logging
 import os
@@ -39,14 +38,30 @@ from pathlib import Path
 from threading import Lock
 from typing import Dict, List, Optional, Tuple
 
+if sys.platform == 'win32':
+    import ctypes.wintypes as wintypes
+
+try:
+    import zstandard as _zstd
+    _ZSTD_AVAILABLE = True
+except ImportError:
+    _ZSTD_AVAILABLE = False
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Configuration — edit these paths if your layout differs
 # ──────────────────────────────────────────────────────────────────────────────
 
-DOLPHIN_EXE = r"C:\Users\Brian\source\repos\Project-Citrus2\Binary\x64\Citrus Dolphin.exe"
-ISO_PATH    = r"C:\Users\Brian\Downloads\Super Mario Strikers (USA)\Super Mario Strikers (USA).iso"
-DOLPHIN_INI = r"C:\Users\Brian\Documents\Dolphin Emulator\Config\Dolphin.ini"
+if sys.platform == 'win32':
+    DOLPHIN_EXE = r"C:\Users\Brian\source\repos\Project-Citrus2\Binary\x64\Citrus Dolphin.exe"
+    ISO_PATH    = r"C:\Users\Brian\Downloads\Super Mario Strikers (USA)\Super Mario Strikers (USA).iso"
+    DOLPHIN_INI = r"C:\Users\Brian\Documents\Dolphin Emulator\Config\Dolphin.ini"
+else:
+    DOLPHIN_EXE = os.environ.get('DOLPHIN_EXE', '/opt/dolphin/dolphin-emu-nogui')
+    ISO_PATH    = os.environ.get('SMS_ISO',      '/data/game.iso')
+    _cfg        = os.environ.get('XDG_CONFIG_HOME',
+                                 os.path.join(os.path.expanduser('~'), '.config'))
+    DOLPHIN_INI = os.environ.get('DOLPHIN_INI',
+                                 os.path.join(_cfg, 'dolphin-emu', 'Dolphin.ini'))
 
 MAX_CONCURRENT        = 3    # simultaneous Dolphin instances
 STARTUP_WAIT_SECS     = 15   # flat wait before first memory check
@@ -163,6 +178,7 @@ def set_null_backend(ini_path: str, enabled: bool) -> None:
         new_lines.append("\n[Movie]\n")
         new_lines.append(f"UseNullBackend = {target_str}\n")
 
+    Path(ini_path).parent.mkdir(parents=True, exist_ok=True)
     with open(ini_path, "w", encoding="utf-8") as fh:
         fh.writelines(new_lines)
     log.info("Dolphin.ini: set [Movie] UseNullBackend = %s in %s", target_str, ini_path)
@@ -352,163 +368,303 @@ def _now_iso() -> str:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Dolphin process memory reader (Windows)
+# Dolphin process memory reader (cross-platform)
 # ──────────────────────────────────────────────────────────────────────────────
 
-class DolphinMemoryReader:
-    """
-    Reads emulated GameCube MEM1 from a live Dolphin process via ReadProcessMemory.
-
-    Dolphin allocates MEM1 as an anonymous file-mapping (MEM_MAPPED) of 24 MB
-    (0x1800000 bytes) for GameCube.  We locate it by scanning VirtualQueryEx for
-    the largest committed PAGE_READWRITE mapped/private region >= 24 MB.
-
-    GC address mapping:
-        host_address = mem1_base + (gc_virt_addr - 0x80000000)
-
-    GameCube memory is big-endian; floats must be read as big-endian.
-    """
-
-    PROCESS_VM_READ          = 0x0010
-    PROCESS_QUERY_INFORMATION = 0x0400
-    MEM_COMMIT   = 0x1000
-    MEM_MAPPED   = 0x40000
-    MEM_PRIVATE  = 0x20000
-    PAGE_RW      = 0x04
-    PAGE_RW_EXEC = 0x40
-
-    GC_MEM1_SIZE = 0x1800000    # 24 MB
-    GC_VIRT_BASE = 0x80000000   # GC kernel virtual base maps to physical 0
-
-    class _MBI(ctypes.Structure):
-        _fields_ = [
-            ("BaseAddress",       ctypes.c_void_p),
-            ("AllocationBase",    ctypes.c_void_p),
-            ("AllocationProtect", wintypes.DWORD),
-            ("RegionSize",        ctypes.c_size_t),
-            ("State",             wintypes.DWORD),
-            ("Protect",           wintypes.DWORD),
-            ("Type",              wintypes.DWORD),
-        ]
-
-    def __init__(self, pid: int):
-        self._pid    = pid
-        self._handle: Optional[int] = None
-        self._base:   Optional[int] = None
-        self._k32    = ctypes.windll.kernel32
-
-    def open(self) -> bool:
-        h = self._k32.OpenProcess(
-            self.PROCESS_VM_READ | self.PROCESS_QUERY_INFORMATION, False, self._pid
-        )
-        if h:
-            self._handle = h
-        return bool(h)
-
-    def close(self) -> None:
-        if self._handle:
-            self._k32.CloseHandle(self._handle)
-            self._handle = None
-
-    def find_mem1(self) -> bool:
+if sys.platform == 'win32':
+    class DolphinMemoryReader:
         """
-        Scan the process address space for the MEM1 region.
+        Reads emulated GameCube MEM1 from a live Dolphin process via ReadProcessMemory.
 
-        Dolphin allocates GC RAM via CreateFileMapping + MapViewOfFileEx, so MEM1
-        appears as MEM_COMMIT | PAGE_READWRITE | MEM_MAPPED (file-backed).
+        Dolphin allocates MEM1 as an anonymous file-mapping (MEM_MAPPED) of 24 MB
+        (0x1800000 bytes) for GameCube.  We locate it by scanning VirtualQueryEx for
+        the largest committed PAGE_READWRITE mapped/private region >= 24 MB.
 
-        We specifically exclude:
-          - MEM_PRIVATE: covers JIT code cache, heaps, stacks
-          - PAGE_EXECUTE_READWRITE (0x40): JIT code cache is 64 MB and would
-            beat MEM1 (24 MB) in any size-based heuristic
+        GC address mapping:
+            host_address = mem1_base + (gc_virt_addr - 0x80000000)
 
-        All matching candidates are collected and logged; the first (lowest host
-        address) is used, since MEM1 is mapped at offset 0 of Dolphin's FastMem
-        reservation and thus has the smallest base address.
+        GameCube memory is big-endian; floats must be read as big-endian.
         """
-        if not self._handle:
-            return False
 
-        mbi        = self._MBI()
-        addr       = 0
-        candidates: List[Tuple[int, int]] = []   # (base, size)
+        PROCESS_VM_READ          = 0x0010
+        PROCESS_QUERY_INFORMATION = 0x0400
+        MEM_COMMIT   = 0x1000
+        MEM_MAPPED   = 0x40000
+        MEM_PRIVATE  = 0x20000
+        PAGE_RW      = 0x04
+        PAGE_RW_EXEC = 0x40
 
-        while addr < 0x7FFFFFFFFFFF:
-            ret = self._k32.VirtualQueryEx(
-                self._handle, ctypes.c_void_p(addr), ctypes.byref(mbi), ctypes.sizeof(mbi)
+        GC_MEM1_SIZE = 0x1800000    # 24 MB
+        GC_VIRT_BASE = 0x80000000   # GC kernel virtual base maps to physical 0
+
+        class _MBI(ctypes.Structure):
+            _fields_ = [
+                ("BaseAddress",       ctypes.c_void_p),
+                ("AllocationBase",    ctypes.c_void_p),
+                ("AllocationProtect", wintypes.DWORD),
+                ("RegionSize",        ctypes.c_size_t),
+                ("State",             wintypes.DWORD),
+                ("Protect",           wintypes.DWORD),
+                ("Type",              wintypes.DWORD),
+            ]
+
+        def __init__(self, pid: int):
+            self._pid    = pid
+            self._handle: Optional[int] = None
+            self._base:   Optional[int] = None
+            self._k32    = ctypes.windll.kernel32
+
+        def open(self) -> bool:
+            h = self._k32.OpenProcess(
+                self.PROCESS_VM_READ | self.PROCESS_QUERY_INFORMATION, False, self._pid
             )
-            if ret == 0:
-                break
+            if h:
+                self._handle = h
+            return bool(h)
 
-            base = mbi.BaseAddress or 0
-            size = mbi.RegionSize
+        def close(self) -> None:
+            if self._handle:
+                self._k32.CloseHandle(self._handle)
+                self._handle = None
 
-            # Strict filter: PAGE_READWRITE (0x04) + MEM_MAPPED only.
-            # This matches Dolphin's MapViewOfFileEx allocations (GC RAM mirrors)
-            # and excludes the JIT code cache (PAGE_EXECUTE_READWRITE, MEM_PRIVATE).
-            if (mbi.State == self.MEM_COMMIT
-                    and mbi.Protect == self.PAGE_RW
-                    and mbi.Type == self.MEM_MAPPED
-                    and size >= self.GC_MEM1_SIZE):
-                candidates.append((base, size))
+        def find_mem1(self) -> bool:
+            """
+            Scan the process address space for the MEM1 region.
 
-            addr = base + size
-            if addr <= 0:
-                break
+            Dolphin allocates GC RAM via CreateFileMapping + MapViewOfFileEx, so MEM1
+            appears as MEM_COMMIT | PAGE_READWRITE | MEM_MAPPED (file-backed).
 
-        if not candidates:
-            return False
+            We specifically exclude:
+              - MEM_PRIVATE: covers JIT code cache, heaps, stacks
+              - PAGE_EXECUTE_READWRITE (0x40): JIT code cache is 64 MB and would
+                beat MEM1 (24 MB) in any size-based heuristic
 
-        log.debug("MEM1 scan: %d candidate(s): %s",
-                  len(candidates),
-                  ", ".join(f"base=0x{b:X} size=0x{s:X}" for b, s in candidates))
+            All matching candidates are collected and logged; the first (lowest host
+            address) is used, since MEM1 is mapped at offset 0 of Dolphin's FastMem
+            reservation and thus has the smallest base address.
+            """
+            if not self._handle:
+                return False
 
-        # Use the first (lowest-address) candidate — MEM1 is at offset 0 of
-        # Dolphin's FastMem reservation, so it has the smallest base address.
-        self._base = candidates[0][0]
-        return True
+            mbi        = self._MBI()
+            addr       = 0
+            candidates: List[Tuple[int, int]] = []   # (base, size)
 
-    @property
-    def mem1_base(self) -> Optional[int]:
-        return self._base
+            while addr < 0x7FFFFFFFFFFF:
+                ret = self._k32.VirtualQueryEx(
+                    self._handle, ctypes.c_void_p(addr), ctypes.byref(mbi), ctypes.sizeof(mbi)
+                )
+                if ret == 0:
+                    break
 
-    def _host_addr(self, gc_virt: int) -> int:
-        assert self._base is not None
-        return self._base + (gc_virt - self.GC_VIRT_BASE)
+                base = mbi.BaseAddress or 0
+                size = mbi.RegionSize
 
-    def _read_raw(self, gc_virt: int, n: int) -> Optional[bytes]:
-        if not self._handle or self._base is None:
-            return None
-        buf       = ctypes.create_string_buffer(n)
-        read_out  = ctypes.c_size_t(0)
-        ok = self._k32.ReadProcessMemory(
-            self._handle, ctypes.c_void_p(self._host_addr(gc_virt)),
-            buf, n, ctypes.byref(read_out)
-        )
-        return bytes(buf.raw) if ok and read_out.value == n else None
+                # Strict filter: PAGE_READWRITE (0x04) + MEM_MAPPED only.
+                # This matches Dolphin's MapViewOfFileEx allocations (GC RAM mirrors)
+                # and excludes the JIT code cache (PAGE_EXECUTE_READWRITE, MEM_PRIVATE).
+                if (mbi.State == self.MEM_COMMIT
+                        and mbi.Protect == self.PAGE_RW
+                        and mbi.Type == self.MEM_MAPPED
+                        and size >= self.GC_MEM1_SIZE):
+                    candidates.append((base, size))
 
-    def read_u8(self, gc_virt: int) -> Optional[int]:
-        data = self._read_raw(gc_virt, 1)
-        return data[0] if data is not None else None
+                addr = base + size
+                if addr <= 0:
+                    break
 
-    def read_u32_be(self, gc_virt: int) -> Optional[int]:
-        """Read a 4-byte big-endian unsigned int (GameCube native endian)."""
-        data = self._read_raw(gc_virt, 4)
-        return struct.unpack(">I", data)[0] if data is not None else None
+            if not candidates:
+                return False
 
-    def read_f32_be(self, gc_virt: int) -> Optional[float]:
-        """Read a 4-byte big-endian float (GameCube native endian)."""
-        data = self._read_raw(gc_virt, 4)
-        if data is None:
-            return None
-        try:
-            val = struct.unpack(">f", data)[0]
-            # Reject NaN / infinity which would indicate wrong region
-            if not (val == val) or val != val or abs(val) > 1e9:
+            log.debug("MEM1 scan: %d candidate(s): %s",
+                      len(candidates),
+                      ", ".join(f"base=0x{b:X} size=0x{s:X}" for b, s in candidates))
+
+            # Use the first (lowest-address) candidate — MEM1 is at offset 0 of
+            # Dolphin's FastMem reservation, so it has the smallest base address.
+            self._base = candidates[0][0]
+            return True
+
+        @property
+        def mem1_base(self) -> Optional[int]:
+            return self._base
+
+        def _host_addr(self, gc_virt: int) -> int:
+            assert self._base is not None
+            return self._base + (gc_virt - self.GC_VIRT_BASE)
+
+        def _read_raw(self, gc_virt: int, n: int) -> Optional[bytes]:
+            if not self._handle or self._base is None:
                 return None
-            return val
-        except struct.error:
-            return None
+            buf       = ctypes.create_string_buffer(n)
+            read_out  = ctypes.c_size_t(0)
+            ok = self._k32.ReadProcessMemory(
+                self._handle, ctypes.c_void_p(self._host_addr(gc_virt)),
+                buf, n, ctypes.byref(read_out)
+            )
+            return bytes(buf.raw) if ok and read_out.value == n else None
+
+        def read_u8(self, gc_virt: int) -> Optional[int]:
+            data = self._read_raw(gc_virt, 1)
+            return data[0] if data is not None else None
+
+        def read_u32_be(self, gc_virt: int) -> Optional[int]:
+            """Read a 4-byte big-endian unsigned int (GameCube native endian)."""
+            data = self._read_raw(gc_virt, 4)
+            return struct.unpack(">I", data)[0] if data is not None else None
+
+        def read_f32_be(self, gc_virt: int) -> Optional[float]:
+            """Read a 4-byte big-endian float (GameCube native endian)."""
+            data = self._read_raw(gc_virt, 4)
+            if data is None:
+                return None
+            try:
+                val = struct.unpack(">f", data)[0]
+                # Reject NaN / infinity which would indicate wrong region
+                if not (val == val) or val != val or abs(val) > 1e9:
+                    return None
+                return val
+            except struct.error:
+                return None
+
+else:
+    class DolphinMemoryReader:
+        """
+        Reads emulated GameCube MEM1 from a live Dolphin process via /proc/{pid}/mem.
+
+        Dolphin maps MEM1 as a 24 MB (0x1800000) anonymous or memfd-backed region.
+        We locate it by scanning /proc/{pid}/maps for the first rw non-executable
+        mapping of exactly 24 MB, then validate with a sanity read.
+
+        GC address mapping:
+            host_address = mem1_base + (gc_virt_addr - 0x80000000)
+
+        Requires read access to /proc/{pid}/mem — works when running as root
+        (default in Docker).  If running as a non-root user, add --cap-add SYS_PTRACE
+        to the docker run command.
+        """
+
+        GC_MEM1_SIZE = 0x1800000    # 24 MB
+        GC_VIRT_BASE = 0x80000000
+
+        # Pseudo-file entries that can never be MEM1.
+        _SKIP_NAMES = frozenset(['[stack]', '[heap]', '[vdso]', '[vsyscall]', '[vvar]'])
+
+        def __init__(self, pid: int):
+            self._pid  = pid
+            self._base: Optional[int] = None
+            self._fd:   Optional[int] = None
+
+        def open(self) -> bool:
+            try:
+                self._fd = os.open(f'/proc/{self._pid}/mem', os.O_RDONLY)
+                return True
+            except OSError as exc:
+                log.debug("Could not open /proc/%d/mem: %s", self._pid, exc)
+                return False
+
+        def close(self) -> None:
+            if self._fd is not None:
+                try:
+                    os.close(self._fd)
+                except OSError:
+                    pass
+                self._fd = None
+
+        def find_mem1(self) -> bool:
+            """
+            Scan /proc/{pid}/maps for the GC MEM1 region.
+
+            Dolphin maps GC RAM via mmap (anonymous or memfd-backed). MEM1 and its
+            mirrors all appear as rw non-executable regions of exactly 24 MB.  We
+            collect all candidates, sort by address, and take the lowest — MEM1 is
+            at offset 0 of Dolphin's FastMem reservation, matching the Windows logic.
+            """
+            candidates: List[Tuple[int, int]] = []
+            try:
+                with open(f'/proc/{self._pid}/maps', 'r') as f:
+                    for line in f:
+                        parts = line.split(None, 5)
+                        if len(parts) < 5:
+                            continue
+                        addr_range = parts[0]
+                        perms      = parts[1]
+
+                        # Must be readable + writable, NOT executable.
+                        if len(perms) < 3 or perms[0] != 'r' or perms[1] != 'w' or perms[2] == 'x':
+                            continue
+
+                        # Skip known system pseudo-mappings.
+                        name = parts[5].strip() if len(parts) > 5 else ''
+                        if name in self._SKIP_NAMES:
+                            continue
+
+                        # Skip ordinary file-backed mappings (shared libraries, etc.)
+                        # but allow memfd mappings (Dolphin's FastMem backing store).
+                        if name.startswith('/') and 'memfd' not in name:
+                            continue
+
+                        start_str, end_str = addr_range.split('-')
+                        start = int(start_str, 16)
+                        end   = int(end_str,   16)
+                        size  = end - start
+
+                        if size >= self.GC_MEM1_SIZE:
+                            candidates.append((start, size))
+
+            except OSError as exc:
+                log.debug("Failed to read /proc/%d/maps: %s", self._pid, exc)
+                return False
+
+            if not candidates:
+                return False
+
+            candidates.sort()  # ascending by base address; MEM1 is the lowest
+            log.debug("MEM1 scan: %d candidate(s): %s",
+                      len(candidates),
+                      ", ".join(f"base=0x{b:X} size=0x{s:X}" for b, s in candidates))
+            self._base = candidates[0][0]
+            return True
+
+        @property
+        def mem1_base(self) -> Optional[int]:
+            return self._base
+
+        def _host_addr(self, gc_virt: int) -> int:
+            assert self._base is not None
+            return self._base + (gc_virt - self.GC_VIRT_BASE)
+
+        def _read_raw(self, gc_virt: int, n: int) -> Optional[bytes]:
+            if self._fd is None or self._base is None:
+                return None
+            try:
+                data = os.pread(self._fd, n, self._host_addr(gc_virt))
+                return data if len(data) == n else None
+            except OSError:
+                return None
+
+        def read_u8(self, gc_virt: int) -> Optional[int]:
+            data = self._read_raw(gc_virt, 1)
+            return data[0] if data is not None else None
+
+        def read_u32_be(self, gc_virt: int) -> Optional[int]:
+            """Read a 4-byte big-endian unsigned int (GameCube native endian)."""
+            data = self._read_raw(gc_virt, 4)
+            return struct.unpack(">I", data)[0] if data is not None else None
+
+        def read_f32_be(self, gc_virt: int) -> Optional[float]:
+            """Read a 4-byte big-endian float (GameCube native endian)."""
+            data = self._read_raw(gc_virt, 4)
+            if data is None:
+                return None
+            try:
+                val = struct.unpack(">f", data)[0]
+                # Reject NaN / infinity which would indicate wrong region
+                if not (val == val) or val != val or abs(val) > 1e9:
+                    return None
+                return val
+            except struct.error:
+                return None
 
 
 # ──────────────────────────────────────────────────────────────────────────────
