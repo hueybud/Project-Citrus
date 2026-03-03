@@ -63,7 +63,7 @@ RUN curl -fSL "https://github.com/microsoft/onnxruntime/releases/download/v${ORT
       -o ort.tgz \
  && tar xf ort.tgz \
  && mkdir -p Externals/onnxruntime/include Externals/onnxruntime/linux-x64/lib \
- && cp onnxruntime-linux-x64-${ORT_VERSION}/include/* Externals/onnxruntime/include/ \
+ && cp -r onnxruntime-linux-x64-${ORT_VERSION}/include/* Externals/onnxruntime/include/ \
  && cp onnxruntime-linux-x64-${ORT_VERSION}/lib/libonnxruntime.so* Externals/onnxruntime/linux-x64/lib/ \
  && rm -rf onnxruntime-linux-x64-${ORT_VERSION} ort.tgz
 
