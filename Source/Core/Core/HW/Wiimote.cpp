@@ -192,6 +192,8 @@ void Initialize(InitializeMode init_mode)
 
 void ResetAllWiimotes()
 {
+  if (s_config.ControllersNeedToBeCreated())
+    return;
   for (int i = WIIMOTE_CHAN_0; i < MAX_BBMOTES; ++i)
     static_cast<WiimoteEmu::Wiimote*>(s_config.GetController(i))->Reset();
 }
