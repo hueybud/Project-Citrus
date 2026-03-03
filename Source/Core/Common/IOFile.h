@@ -106,7 +106,8 @@ public:
   void ClearError()
   {
     m_good = true;
-    std::clearerr(m_file);
+    if (m_file)
+      std::clearerr(m_file);
   }
 
 private:
