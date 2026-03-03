@@ -12,6 +12,7 @@
 #include "HW/Memmap.h"
 #include "Movie.h"
 #include <VideoCommon/OnScreenDisplay.h>
+#include <filesystem>
 #include <queue>
 
 static bool boolMatchStart = false;
