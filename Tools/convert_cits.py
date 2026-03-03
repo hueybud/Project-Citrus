@@ -532,16 +532,14 @@ else:
         """
         Reads emulated GameCube MEM1 from a live Dolphin process via /proc/{pid}/mem.
 
-        Dolphin maps MEM1 as a 24 MB (0x1800000) anonymous or memfd-backed region.
-        We locate it by scanning /proc/{pid}/maps for the first rw non-executable
-        mapping of exactly 24 MB, then validate with a sanity read.
+        Reads emulated GameCube MEM1 from a live Dolphin process.
 
-        GC address mapping:
-            host_address = mem1_base + (gc_virt_addr - 0x80000000)
-
-        Requires read access to /proc/{pid}/mem — works when running as root
-        (default in Docker).  If running as a non-root user, add --cap-add SYS_PTRACE
-        to the docker run command.
+        Two strategies, tried in order:
+          1. Direct /dev/shm read: Dolphin creates /dev/shm/dolphin-emu.{pid};
+             GC physical address 0 is at file offset 0, so reads use
+             (gc_virt - 0x80000000) as the file offset.  Reliable on WSL2.
+          2. /proc/{pid}/mem: scan /proc/maps for the MEM1 region, then read
+             via process memory.  Works on bare-metal Linux and Docker.
         """
 
         GC_MEM1_SIZE = 0x1800000    # 24 MB
@@ -551,11 +549,22 @@ else:
         _SKIP_NAMES = frozenset(['[stack]', '[heap]', '[vdso]', '[vsyscall]', '[vvar]'])
 
         def __init__(self, pid: int):
-            self._pid  = pid
-            self._base: Optional[int] = None
-            self._fd:   Optional[int] = None
+            self._pid     = pid
+            self._base:   Optional[int] = None
+            self._fd:     Optional[int] = None   # /proc/pid/mem fd
+            self._shm_fd: Optional[int] = None   # /dev/shm/dolphin-emu.{pid} fd
 
         def open(self) -> bool:
+            # Prefer direct /dev/shm read — more reliable than /proc/pid/mem on
+            # WSL2 where shared-memory regions return zeros via process_vm_readv.
+            shm_path = f'/dev/shm/dolphin-emu.{self._pid}'
+            try:
+                self._shm_fd = os.open(shm_path, os.O_RDONLY)
+                log.debug("Opened %s for direct shm read", shm_path)
+                return True
+            except OSError:
+                pass
+            # Fallback: /proc/pid/mem (works on bare-metal Linux / Docker)
             try:
                 self._fd = os.open(f'/proc/{self._pid}/mem', os.O_RDONLY)
                 return True
@@ -564,22 +573,31 @@ else:
                 return False
 
         def close(self) -> None:
-            if self._fd is not None:
-                try:
-                    os.close(self._fd)
-                except OSError:
-                    pass
-                self._fd = None
+            for attr in ('_shm_fd', '_fd'):
+                fd = getattr(self, attr)
+                if fd is not None:
+                    try:
+                        os.close(fd)
+                    except OSError:
+                        pass
+                    setattr(self, attr, None)
 
         def find_mem1(self) -> bool:
             """
-            Scan /proc/{pid}/maps for the GC MEM1 region.
+            Locate GC MEM1.
 
-            Dolphin maps GC RAM via mmap (anonymous or memfd-backed). MEM1 and its
-            mirrors all appear as rw non-executable regions of exactly 24 MB.  We
-            collect all candidates, sort by address, and take the lowest — MEM1 is
-            at offset 0 of Dolphin's FastMem reservation, matching the Windows logic.
+            When Dolphin uses /dev/shm (WSL2 / older kernels), GC RAM lives at
+            file offset 0 of /dev/shm/dolphin-emu.{pid}, so no virtual-address
+            scan is needed — reads use (gc_virt - GC_VIRT_BASE) as the file offset.
+
+            Otherwise scan /proc/{pid}/maps for the rw non-executable region that
+            is exactly GC_MEM1_SIZE (24 MB) and backed by dolphin-emu shm or memfd.
             """
+            if self._shm_fd is not None:
+                # Direct shm mode: GC physical address 0 is at file offset 0.
+                # Set _base = 0 so _host_addr() computes gc_virt - GC_VIRT_BASE.
+                self._base = 0
+                return True
             candidates: List[Tuple[int, int]] = []
             try:
                 with open(f'/proc/{self._pid}/maps', 'r') as f:
@@ -642,10 +660,11 @@ else:
             return self._base + (gc_virt - self.GC_VIRT_BASE)
 
         def _read_raw(self, gc_virt: int, n: int) -> Optional[bytes]:
-            if self._fd is None or self._base is None:
+            fd = self._shm_fd if self._shm_fd is not None else self._fd
+            if fd is None or self._base is None:
                 return None
             try:
-                data = os.pread(self._fd, n, self._host_addr(gc_virt))
+                data = os.pread(fd, n, self._host_addr(gc_virt))
                 return data if len(data) == n else None
             except OSError:
                 return None
