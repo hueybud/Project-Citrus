@@ -240,27 +240,46 @@ bool AIController::Load(const std::string& onnx_path)
     m_session = std::make_unique<Ort::Session>(*m_env, onnx_path.c_str(), opts);
 #endif
 
-    // Validate expected I/O
+    // Validate expected I/O: features + h_in + c_in → btn_probs + stick_vals + h_out + c_out
     size_t num_inputs  = m_session->GetInputCount();
     size_t num_outputs = m_session->GetOutputCount();
 
-    if (num_inputs != 1 || num_outputs != 2)
+    if (num_inputs != 3 || num_outputs != 4)
     {
-      ERROR_LOG_FMT(CORE, "AIController: unexpected I/O count: {} inputs {} outputs",
+      ERROR_LOG_FMT(CORE,
+                    "AIController: unexpected I/O count: {} inputs {} outputs "
+                    "(expected 3 inputs: features/h_in/c_in, "
+                    "4 outputs: btn_probs/stick_vals/h_out/c_out)",
                     num_inputs, num_outputs);
       Shutdown();
       return false;
     }
 
-    // Check input shape [?, INPUT_DIM]
-    auto in_info  = m_session->GetInputTypeInfo(0);
-    auto in_shape = in_info.GetTensorTypeAndShapeInfo().GetShape();
-    if (in_shape.size() != 2 || in_shape[1] != INPUT_DIM)
+    // Check features input shape [1, FEATURE_DIM]
+    auto feat_info  = m_session->GetInputTypeInfo(0);
+    auto feat_shape = feat_info.GetTensorTypeAndShapeInfo().GetShape();
+    if (feat_shape.size() != 2 || feat_shape[1] != FEATURE_DIM)
     {
-      ERROR_LOG_FMT(CORE, "AIController: unexpected input shape (expected [?,{}])",
-                    INPUT_DIM);
+      ERROR_LOG_FMT(CORE, "AIController: unexpected features shape (expected [1,{}])",
+                    FEATURE_DIM);
       Shutdown();
       return false;
+    }
+
+    // Check h_in / c_in shape [LSTM_LAYERS, 1, HIDDEN_SIZE]
+    for (int i = 1; i <= 2; ++i)
+    {
+      auto hc_info  = m_session->GetInputTypeInfo(i);
+      auto hc_shape = hc_info.GetTensorTypeAndShapeInfo().GetShape();
+      if (hc_shape.size() != 3 || hc_shape[0] != LSTM_LAYERS || hc_shape[2] != HIDDEN_SIZE)
+      {
+        ERROR_LOG_FMT(CORE,
+                      "AIController: unexpected h/c input {} shape "
+                      "(expected [{},1,{}])",
+                      i, LSTM_LAYERS, HIDDEN_SIZE);
+        Shutdown();
+        return false;
+      }
     }
 
     m_loaded = true;
@@ -286,11 +305,13 @@ void AIController::Shutdown()
   m_session.reset();
   m_env.reset();
   m_loaded  = false;
+  m_h_state.fill(0.0f);
+  m_c_state.fill(0.0f);
   std::memset(&m_last_output, 0, sizeof(m_last_output));
-  m_last_output.stickX    = 128;
-  m_last_output.stickY    = 128;
-  m_last_output.substickX = 128;
-  m_last_output.substickY = 128;
+  m_last_output.stickX      = 128;
+  m_last_output.stickY      = 128;
+  m_last_output.substickX   = 128;
+  m_last_output.substickY   = 128;
   m_last_output.isConnected = true;
 }
 
@@ -307,38 +328,12 @@ void AIController::OnFrameEnd(int controlled_port, bool mirror_x)
   std::vector<float> features = ReadGameState(controlled_port, mirror_x);
   if (features.empty())
   {
-    // Not in active play (menus, goal celebration, etc.) — disengage and reset buffer
+    // Not in active play (menus, goal celebration, etc.) — reset LSTM state so the
+    // next active phase starts with a clean context.
     m_match_active = false;
-    m_buffer_head  = 0;
-    m_buffer_count = 0;
+    m_h_state.fill(0.0f);
+    m_c_state.fill(0.0f);
     return;
-  }
-
-  // Write new frame into circular buffer at current head position
-  std::copy(features.begin(), features.end(), m_frame_buffer[m_buffer_head].begin());
-
-  if (m_buffer_count == 0)
-  {
-    // First active frame after reset: replicate to all slots so inference runs immediately
-    // without zero-padding. Slots 1..W-1 are filled; head advances to 1.
-    for (int i = 1; i < WINDOW_SIZE; i++)
-      m_frame_buffer[i] = m_frame_buffer[0];
-    m_buffer_head  = 1;
-    m_buffer_count = WINDOW_SIZE;
-  }
-  else
-  {
-    m_buffer_head = (m_buffer_head + 1) % WINDOW_SIZE;
-  }
-
-  // Assemble flat INPUT_DIM input: oldest slot first, newest last.
-  // m_buffer_head now points to the oldest slot (the one about to be overwritten next).
-  std::array<float, INPUT_DIM> flat_input;
-  for (int k = 0; k < WINDOW_SIZE; k++)
-  {
-    int slot = (m_buffer_head + k) % WINDOW_SIZE;
-    const float* src = m_frame_buffer[slot].data();
-    std::copy(src, src + FEATURE_DIM, flat_input.data() + k * FEATURE_DIM);
   }
 
   try
@@ -346,21 +341,39 @@ void AIController::OnFrameEnd(int controlled_port, bool mirror_x)
     Ort::MemoryInfo mem_info =
         Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
 
-    int64_t input_shape[] = {1, INPUT_DIM};
-    Ort::Value input_tensor = Ort::Value::CreateTensor<float>(
-        mem_info, flat_input.data(), INPUT_DIM, input_shape, 2);
+    // Input 0: features [1, FEATURE_DIM]
+    int64_t feat_shape[] = {1, FEATURE_DIM};
+    Ort::Value feat_tensor = Ort::Value::CreateTensor<float>(
+        mem_info, features.data(), FEATURE_DIM, feat_shape, 2);
 
-    const char* input_names[]  = {"features"};
-    const char* output_names[] = {"btn_probs", "stick_vals"};
+    // Inputs 1 & 2: h_in, c_in — [LSTM_LAYERS, 1, HIDDEN_SIZE]
+    int64_t hc_shape[] = {LSTM_LAYERS, 1, HIDDEN_SIZE};
+    Ort::Value h_tensor = Ort::Value::CreateTensor<float>(
+        mem_info, m_h_state.data(), HC_SIZE, hc_shape, 3);
+    Ort::Value c_tensor = Ort::Value::CreateTensor<float>(
+        mem_info, m_c_state.data(), HC_SIZE, hc_shape, 3);
 
-    auto outputs = m_session->Run(Ort::RunOptions{nullptr}, input_names, &input_tensor, 1,
-                                  output_names, 2);
+    std::array<Ort::Value, 3> inputs = {
+        std::move(feat_tensor), std::move(h_tensor), std::move(c_tensor)};
+
+    const char* input_names[]  = {"features", "h_in", "c_in"};
+    const char* output_names[] = {"btn_probs", "stick_vals", "h_out", "c_out"};
+
+    auto outputs = m_session->Run(Ort::RunOptions{nullptr},
+                                  input_names, inputs.data(), 3,
+                                  output_names, 4);
 
     const float* btn_probs  = outputs[0].GetTensorData<float>();
     const float* stick_vals = outputs[1].GetTensorData<float>();
 
     m_last_output  = DecodeOutput(btn_probs, stick_vals, mirror_x);
     m_match_active = true;
+
+    // Carry LSTM state forward to the next frame
+    const float* h_out = outputs[2].GetTensorData<float>();
+    const float* c_out = outputs[3].GetTensorData<float>();
+    std::copy(h_out, h_out + HC_SIZE, m_h_state.begin());
+    std::copy(c_out, c_out + HC_SIZE, m_c_state.begin());
   }
   catch (const Ort::Exception& e)
   {

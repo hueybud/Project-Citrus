@@ -53,9 +53,10 @@ public:
   GCPadStatus GetLastOutput() const;
 
 private:
-  static constexpr int WINDOW_SIZE = 8;
-  static constexpr int FEATURE_DIM = 430;                    // features per single frame
-  static constexpr int INPUT_DIM   = WINDOW_SIZE * FEATURE_DIM;  // 3440 — ORT input width
+  static constexpr int FEATURE_DIM = 430;   // features per single frame
+  static constexpr int HIDDEN_SIZE  = 512;   // LSTM hidden units
+  static constexpr int LSTM_LAYERS  = 2;     // stacked LSTM layers
+  static constexpr int HC_SIZE      = LSTM_LAYERS * HIDDEN_SIZE;  // 1024 — h or c flat size
 
   // Build the 430-float feature vector from live GC memory.
   // Mirrors the Python extract_features() in Tools/build_dataset.py exactly.
@@ -74,14 +75,11 @@ private:
   bool                          m_loaded       = false;
   bool                          m_match_active = false;
 
-  // Circular frame buffer for temporal stacking (WINDOW_SIZE=8 frames).
-  // m_buffer_head: index of the next slot to write.
-  // m_buffer_count: 0 until first active frame, then WINDOW_SIZE thereafter.
-  // On the first active frame after a reset, all slots are filled with that frame
-  // (warmup replication) so inference can run immediately without zero-padding.
-  std::array<std::array<float, FEATURE_DIM>, WINDOW_SIZE> m_frame_buffer{};
-  int m_buffer_head  = 0;
-  int m_buffer_count = 0;
+  // Persistent LSTM hidden/cell state — carries temporal context across game frames.
+  // Each array stores [LSTM_LAYERS, 1, HIDDEN_SIZE] = [2, 1, 512] in row-major order.
+  // Reset to zeros when match becomes inactive (goal celebrations, menus, etc.).
+  std::array<float, HC_SIZE> m_h_state{};
+  std::array<float, HC_SIZE> m_c_state{};
 };
 
 }  // namespace Movie
