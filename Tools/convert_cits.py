@@ -781,7 +781,7 @@ def convert_one_cit(
         return False
 
     # ── Launch Dolphin ────────────────────────────────────────────────────────
-    cmd = [DOLPHIN_EXE, "-m", str(cit_copy), "-e", ISO_PATH]
+    cmd = [DOLPHIN_EXE, "-m", str(cit_copy), "-e", ISO_PATH, "-p", "headless"]
     log.info("[%s] Launching: %s -m \"%s\" ...", stem, DOLPHIN_EXE, cit_name)
 
     dolphin_log = job_tmp / "dolphin.log"
