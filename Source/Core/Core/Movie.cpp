@@ -85,7 +85,11 @@ namespace fs = std::filesystem;
 
 #include "InputCommon/GCPadStatus.h"
 
+#ifdef _WIN32
 #include <direct.h>
+#else
+#include <sys/stat.h>
+#endif
 #include "VideoCommon/VideoBackendBase.h"
 #include "VideoCommon/VideoConfig.h"
 #include "Core/StateAuxillary.h"
@@ -1493,7 +1497,11 @@ bool PlayInput(const std::string& movie_path, std::optional<std::string>* savest
       {
         // Entry is a directory, so create it.
         printf("dir:%s\n", filename);
+#ifdef _WIN32
         _mkdir(filename);
+#else
+        mkdir(filename, 0777);
+#endif
       }
       else
       {

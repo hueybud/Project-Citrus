@@ -15,6 +15,7 @@
 
 #include "libHDiffPatch/HDiff/diff.h"
 
+#include <fmt/format.h>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
@@ -163,7 +164,7 @@ std::string Metadata::getJSONString()
   std::string md5String = "";
   for (int i = 0; i < md5Hash.size(); i++)
   {
-    md5String += std::format("{:x}", md5Hash[i]);
+    md5String += fmt::format("{:x}", md5Hash[i]);
   }
   json_stream << "  \"Game Hash\": \"" << md5String << "\"," << std::endl;
   json_stream << "  \"Controller Port Info\": {" << std::endl;
