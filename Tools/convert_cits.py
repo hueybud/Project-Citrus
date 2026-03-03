@@ -25,6 +25,7 @@ import ctypes
 import json
 import logging
 import os
+import re
 import shutil
 import struct
 import subprocess
@@ -931,6 +932,15 @@ def convert_one_cit(
         return False
 
     # ── Phase 3: wait for CITF flush, then copy out and kill Dolphin ─────────
+    try:
+        for line in dolphin_log.read_text(errors='replace').splitlines():
+            m = re.search(r'FPS:\s*(\d+)\s*-\s*VPS:\s*(\d+)\s*-\s*(\d+)%', line)
+            if m:
+                log.info("[%s] First recorded FPS: %s | VPS: %s | Speed: %s%%",
+                         stem, m.group(1), m.group(2), m.group(3))
+                break
+    except Exception:
+        pass
     log.info("[%s] Waiting %ds for CITF to flush to disk...", stem, int(post_end_wait))
     time.sleep(post_end_wait)
 
