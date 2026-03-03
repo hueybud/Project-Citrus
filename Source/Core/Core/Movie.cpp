@@ -14,6 +14,9 @@ namespace fs = std::filesystem;
 // Enable LZMA2 decompressor plugin for old-format diffs (created by hdiffz -c-lzma2).
 #define _CompressPlugin_lzma2
 #define _IsNeedIncludeDefaultCompressHead 1
+// CommonTypes.h defines LONG as a macro on non-Windows; undef it before
+// lzma's 7zTypes.h which uses LONG as a typedef name.
+#undef LONG
 #include "decompress_plugin_demo.h"
 
 #include "libHDiffPatch/HPatch/patch.h"
