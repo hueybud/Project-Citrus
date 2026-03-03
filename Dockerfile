@@ -110,6 +110,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN mkdir -p /opt/dolphin
 COPY --from=builder /build/dolphin/build/Binaries/dolphin-emu-nogui /opt/dolphin/
 COPY --from=builder /build/dolphin/Data/Sys                          /opt/dolphin/Sys/
+COPY --from=builder /build/dolphin/Source/Core/DolphinQt/base.sav    /opt/dolphin/
 
 # ── ONNX Runtime shared library ───────────────────────────────────────────────
 COPY --from=builder /build/dolphin/Externals/onnxruntime/linux-x64/lib/libonnxruntime.so* /usr/local/lib/
