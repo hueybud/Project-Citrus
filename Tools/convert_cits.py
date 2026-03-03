@@ -599,9 +599,12 @@ else:
                         if name in self._SKIP_NAMES:
                             continue
 
-                        # Skip ordinary file-backed mappings (shared libraries, etc.)
-                        # but allow memfd mappings (Dolphin's FastMem backing store).
-                        if name.startswith('/') and 'memfd' not in name:
+                        # Allow:
+                        #   - Anonymous mappings (empty name)
+                        #   - memfd-backed mappings (Dolphin FastMem, newer kernels)
+                        #   - /dev/shm/dolphin-emu.* (Dolphin SharedMem, WSL2 / older kernels)
+                        # Skip all other file-backed mappings (shared libraries, etc.)
+                        if name.startswith('/') and 'memfd' not in name and 'dolphin-emu' not in name:
                             continue
 
                         start_str, end_str = addr_range.split('-')
@@ -619,11 +622,15 @@ else:
             if not candidates:
                 return False
 
-            candidates.sort()  # ascending by base address; MEM1 is the lowest
+            candidates.sort()  # ascending by base address
             log.debug("MEM1 scan: %d candidate(s): %s",
                       len(candidates),
                       ", ".join(f"base=0x{b:X} size=0x{s:X}" for b, s in candidates))
-            self._base = candidates[0][0]
+            # Prefer exact-size match (GC_MEM1_SIZE = 24MB) — on WSL2/Linux,
+            # Dolphin maps several larger regions from the same shm file alongside
+            # the one true 24MB MEM1 window.  Fall back to lowest-address otherwise.
+            exact = [(b, s) for b, s in candidates if s == self.GC_MEM1_SIZE]
+            self._base = (sorted(exact)[0] if exact else candidates[0])[0]
             return True
 
         @property
@@ -828,8 +835,12 @@ def convert_one_cit(
             looks_valid = 0x80000000 <= captain_ptr <= 0x81FFFFFF
             log.info("[%s] MEM1 sanity: 0x8030d510 = 0x%08X (%s)",
                      stem, captain_ptr, "looks valid" if looks_valid else "UNEXPECTED — may be wrong region")
+            if not looks_valid:
+                mem_ok = False
+                log.warning("[%s] MEM1 sanity failed — falling back to file-based monitoring", stem)
         else:
-            log.warning("[%s] MEM1 sanity: could not read 0x8030d510", stem)
+            log.warning("[%s] MEM1 sanity: could not read 0x8030d510 — falling back to file-based monitoring", stem)
+            mem_ok = False
     else:
         log.warning("[%s] MEM1 not found — falling back to file-based monitoring", stem)
 
@@ -880,9 +891,9 @@ def convert_one_cit(
                 match_ended = True
                 break
         else:
-            # File-based fallback: CITF appears once EndCapture() runs
-            if expected_citf.exists():
-                log.info("[%s] CITF file appeared (file-monitor fallback)", stem)
+            # File-based fallback: CITF appears in temp dir once EndCapture() runs
+            if (job_tmp / f"{stem}.citframes").exists():
+                log.info("[%s] CITF file appeared in temp dir (file-monitor fallback)", stem)
                 match_ended = True
                 break
 
