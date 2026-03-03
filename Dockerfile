@@ -96,10 +96,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     zlib1g \
     libpng16-16 \
     libvulkan1 \
-    libavformat60t64 \
-    libavcodec60t64 \
-    libswscale7t64 \
-    libavutil58t64 \
+    libavformat60 \
+    libavcodec60 \
+    libswscale7 \
+    libavutil58 \
     python3 \
     python3-zstandard \
   && rm -rf /var/lib/apt/lists/*
