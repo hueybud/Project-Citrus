@@ -784,8 +784,10 @@ def convert_one_cit(
     cmd = [DOLPHIN_EXE, "-m", str(cit_copy), "-e", ISO_PATH]
     log.info("[%s] Launching: %s -m \"%s\" ...", stem, DOLPHIN_EXE, cit_name)
 
+    dolphin_log = job_tmp / "dolphin.log"
     try:
-        proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        with open(dolphin_log, 'w') as dlf:
+            proc = subprocess.Popen(cmd, stdout=dlf, stderr=dlf)
     except Exception as exc:
         shutil.rmtree(job_tmp, ignore_errors=True)
         reason = f"could not launch Dolphin: {exc}"
@@ -799,6 +801,12 @@ def convert_one_cit(
 
     # ── Check Dolphin is still alive ─────────────────────────────────────────
     if proc.poll() is not None:
+        try:
+            dolphin_output = dolphin_log.read_text(errors='replace').strip()
+            if dolphin_output:
+                log.error("[%s] Dolphin output:\n%s", stem, dolphin_output)
+        except Exception:
+            pass
         shutil.rmtree(job_tmp, ignore_errors=True)
         reason = f"Dolphin exited during startup (code {proc.returncode})"
         log.error("[%s] %s", stem, reason)
