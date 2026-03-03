@@ -47,6 +47,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libavcodec-dev \
     libavformat-dev \
     libswscale-dev \
+    curl \
   && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /build/dolphin
@@ -57,13 +58,14 @@ COPY . .
 # Download ONNX Runtime Linux binaries + headers.
 # This overwrites any Windows-only headers already in the build context with the
 # same platform-neutral headers from the Linux tarball — safe and idempotent.
-ARG ORT_VERSION=1.21.0
-RUN wget -q "https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/onnxruntime-linux-x64-${ORT_VERSION}.tgz" \
- && tar xf onnxruntime-linux-x64-${ORT_VERSION}.tgz \
+ARG ORT_VERSION=1.20.1
+RUN curl -fSL "https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/onnxruntime-linux-x64-${ORT_VERSION}.tgz" \
+      -o ort.tgz \
+ && tar xf ort.tgz \
  && mkdir -p Externals/onnxruntime/include Externals/onnxruntime/linux-x64/lib \
  && cp onnxruntime-linux-x64-${ORT_VERSION}/include/* Externals/onnxruntime/include/ \
  && cp onnxruntime-linux-x64-${ORT_VERSION}/lib/libonnxruntime.so* Externals/onnxruntime/linux-x64/lib/ \
- && rm -rf onnxruntime-linux-x64-${ORT_VERSION}*
+ && rm -rf onnxruntime-linux-x64-${ORT_VERSION} ort.tgz
 
 # Configure and build DolphinNoGUI (headless, no Qt, no X11).
 RUN cmake -S . -B build \
