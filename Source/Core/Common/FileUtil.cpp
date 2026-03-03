@@ -1117,6 +1117,7 @@ bool ReadFileToString(const std::string& filename, std::string& str)
 
 std::string GetAppDataPath()
 {
+#ifdef _WIN32
   char* appDataPath;
   size_t len;
   _dupenv_s(&appDataPath, &len, "APPDATA");
@@ -1124,21 +1125,33 @@ std::string GetAppDataPath()
   std::string appDataString = appDataPath;
   free(appDataPath);
   return appDataString;
+#else
+  const char* home = getenv("HOME");
+  return home ? std::string(home) : std::string("/tmp");
+#endif
 }
 
 std::string GetCitrusLauncherEXEPath()
 {
+#ifdef _WIN32
   std::string appDataPath = GetAppDataPath();
   // C:/Users/Brian/AppData/Roaming
   appDataPath.replace(appDataPath.find("Roaming"), sizeof("Roaming") - 1, "Local");
   // C:/Users/Brian/AppData/Local
   appDataPath += "\\Programs\\citruslauncher\\Citrus Launcher.exe";
   return appDataPath;
+#else
+  return "";
+#endif
 }
 
 static std::vector<std::string> citrusUserFilePaths = {
-    GetExeDirectory() + "\\user.json",
-    GetAppDataPath() + "\\citruslauncher" + "\\user.json"
+    GetExeDirectory() + DIR_SEP + "user.json",
+#ifdef _WIN32
+    GetAppDataPath() + "\\citruslauncher\\user.json"
+#else
+    GetAppDataPath() + "/.config/citruslauncher/user.json"
+#endif
 };
 
 // Used for telling the user where we looked for the user.json file when we didn't find it
