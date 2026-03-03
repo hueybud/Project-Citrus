@@ -175,23 +175,6 @@ void FrameUpdateOnCPUThread()
     NetPlay::NetPlayClient::SendTimeBase();
 }
 
-std::wstring GetEnvString()
-{
-  wchar_t* env = GetEnvironmentStrings();
-  if (!env)
-    abort();
-  const wchar_t* var = env;
-  size_t totallen = 0;
-  size_t len;
-  while ((len = wcslen(var)) > 0)
-  {
-    totallen += len + 1;
-    var += len + 1;
-  }
-  std::wstring result(env, totallen);
-  FreeEnvironmentStrings(env);
-  return result;
-}
 
 void OnFrameEnd()
 {
