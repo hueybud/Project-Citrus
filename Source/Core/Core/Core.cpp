@@ -302,8 +302,12 @@ void OnFrameEnd()
 
   if (Memory::Read_U8(Metadata::addressMatchStart) == 1)
   {
-    Core::DisplayMessage(fmt::format("CITF: match start fired: IsPlayingInput={} IsCapturing={} matchMode={}",
-                                     Movie::IsPlayingInput(), GameStateCapture::IsCapturing(), Metadata::getMatchMode()), 3000);
+    // Only log on the first fire (address stays 1 for the entire match)
+    if (!GameStateCapture::IsCapturing())
+    {
+      Core::DisplayMessage(fmt::format("CITF: match start fired: IsPlayingInput={} IsCapturing={} matchMode={}",
+                                       Movie::IsPlayingInput(), GameStateCapture::IsCapturing(), Metadata::getMatchMode()), 3000);
+    }
     // training mode
     if (Memory::Read_U8(Metadata::addressCustomTrainingModeEnabled) == 1 && Metadata::getMatchMode() == 1 && !NetPlay::IsNetPlayRunning() && !Movie::IsPlayingInput())
     {

@@ -933,12 +933,17 @@ def convert_one_cit(
 
     # ── Phase 3: wait for CITF flush, then copy out and kill Dolphin ─────────
     try:
+        fps_matches = []
         for line in dolphin_log.read_text(errors='replace').splitlines():
             m = re.search(r'FPS:\s*(\d+)\s*-\s*VPS:\s*(\d+)\s*-\s*(\d+)%', line)
             if m:
-                log.info("[%s] First recorded FPS: %s | VPS: %s | Speed: %s%%",
-                         stem, m.group(1), m.group(2), m.group(3))
-                break
+                fps_matches.append(m)
+                if len(fps_matches) == 10:
+                    break
+        if fps_matches:
+            m = fps_matches[-1]
+            log.info("[%s] FPS (stabilized): %s | VPS: %s | Speed: %s%%",
+                     stem, m.group(1), m.group(2), m.group(3))
     except Exception:
         pass
     log.info("[%s] Waiting %ds for CITF to flush to disk...", stem, int(post_end_wait))
