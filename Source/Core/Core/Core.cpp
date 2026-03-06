@@ -302,6 +302,8 @@ void OnFrameEnd()
 
   if (Memory::Read_U8(Metadata::addressMatchStart) == 1)
   {
+    INFO_LOG_FMT(CORE, "Match start fired: IsPlayingInput={} IsCapturing={} matchMode={}",
+                 Movie::IsPlayingInput(), GameStateCapture::IsCapturing(), Metadata::getMatchMode());
     // training mode
     if (Memory::Read_U8(Metadata::addressCustomTrainingModeEnabled) == 1 && Metadata::getMatchMode() == 1 && !NetPlay::IsNetPlayRunning() && !Movie::IsPlayingInput())
     {
@@ -342,6 +344,8 @@ void OnFrameEnd()
     // During replay playback, begin per-frame game state capture
     if (Movie::IsPlayingInput() && !GameStateCapture::IsCapturing())
     {
+      INFO_LOG_FMT(CORE, "BeginCapture called for CIT: stem='{}' dir='{}'",
+                   Movie::GetCITStemName(), Movie::GetCITDirPath());
       GameStateCapture::BeginCapture();
     }
 
@@ -476,6 +480,8 @@ void OnFrameEnd()
 
   if (Memory::Read_U8(Metadata::addressMatchEnd) == 1)
   {
+    INFO_LOG_FMT(CORE, "Match end fired: IsPlayingInput={} IsCapturing={} matchMode={}",
+                 Movie::IsPlayingInput(), GameStateCapture::IsCapturing(), Metadata::getMatchMode());
     // training mode
     if (Memory::Read_U8(Metadata::addressCustomTrainingModeEnabled) && Metadata::getMatchMode() == 1 && !NetPlay::IsNetPlayRunning())
     {
@@ -492,7 +498,12 @@ void OnFrameEnd()
       std::string basename = cit_stem.empty() ? "output" : cit_stem;
       std::string dir = cit_dir.empty() ? File::GetUserPath(D_CITRUSREPLAYS_IDX) : (cit_dir + "/");
       std::string output_path = dir + basename + ".citframes";
+      INFO_LOG_FMT(CORE, "EndCapture -> '{}'", output_path);
       GameStateCapture::EndCapture(output_path);
+    }
+    else
+    {
+      INFO_LOG_FMT(CORE, "Match end fired but IsCapturing=false — CITF will not be written");
     }
 
     if (!StateAuxillary::getBoolMatchEnd() && !Movie::IsPlayingInput())
