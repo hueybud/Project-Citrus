@@ -537,24 +537,6 @@ void OnFrameEnd()
 
   }
 
-  // If movie playback ends while CITF capture is still active, the match end gecko code
-  // never had a chance to fire (DTM was cut before the final animation). End the capture
-  // now and write the match end signal so convert_cits.py can proceed.
-  static bool s_was_playing_input = false;
-  const bool is_playing_now = Movie::IsPlayingInput();
-  if (s_was_playing_input && !is_playing_now && GameStateCapture::IsCapturing())
-  {
-    std::string cit_stem = Movie::GetCITStemName();
-    std::string cit_dir  = Movie::GetCITDirPath();
-    std::string basename = cit_stem.empty() ? "output" : cit_stem;
-    std::string dir = cit_dir.empty() ? File::GetUserPath(D_CITRUSREPLAYS_IDX) : (cit_dir + "/");
-    std::string output_path = dir + basename + ".citframes";
-    Core::DisplayMessage(fmt::format("CITF: movie ended while capturing — EndCapture -> '{}'", output_path), 3000);
-    GameStateCapture::EndCapture(output_path);
-    Memory::Write_U8(1, Metadata::addressMatchEnd);
-  }
-  s_was_playing_input = is_playing_now;
-
   // TODO: build small save states every 5 seconds during playback
 
   /*
