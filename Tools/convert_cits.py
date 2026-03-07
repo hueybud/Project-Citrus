@@ -221,10 +221,18 @@ def extract_cit_metadata(cit_path: Path) -> Dict:
         }
 
         # Player entries: [["P1 - Name", "discordId"], ...]
-        for team_key in ("Left Team Player Info", "Right Team Player Info"):
-            for entry in obj.get(team_key, []):
-                if isinstance(entry, list) and len(entry) >= 2:
-                    meta["players"].append({"name": entry[0], "discord_id": entry[1]})
+        meta["left_players"]  = []
+        meta["right_players"] = []
+        for entry in obj.get("Left Team Player Info", []):
+            if isinstance(entry, list) and len(entry) >= 2:
+                p = {"name": entry[0], "discord_id": entry[1]}
+                meta["left_players"].append(p)
+                meta["players"].append(p)
+        for entry in obj.get("Right Team Player Info", []):
+            if isinstance(entry, list) and len(entry) >= 2:
+                p = {"name": entry[0], "discord_id": entry[1]}
+                meta["right_players"].append(p)
+                meta["players"].append(p)
 
         meta["port_teams"] = obj.get("Controller Port Info", {})
         return meta
@@ -245,6 +253,26 @@ def check_comp_rules(metadata: Dict) -> Optional[str]:
         if actual != expected:
             violations.append(f"{field}={actual!r} (expected {expected!r})")
     return (", ".join(violations)) if violations else None
+
+
+def check_hvh_metadata(metadata: Dict) -> Optional[str]:
+    """
+    Check that exactly one human plays on each team.
+    Returns a violation string if not HvH, or None if OK.
+    A human is identified by a non-empty, non-zero discord_id.
+    """
+    def is_human(p: Dict) -> bool:
+        did = str(p.get("discord_id", "")).strip()
+        return bool(did) and did != "0"
+
+    left_humans  = [p for p in metadata.get("left_players",  []) if is_human(p)]
+    right_humans = [p for p in metadata.get("right_players", []) if is_human(p)]
+
+    if len(left_humans) != 1:
+        return f"left team has {len(left_humans)} human(s) (expected 1)"
+    if len(right_humans) != 1:
+        return f"right team has {len(right_humans)} human(s) (expected 1)"
+    return None
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -769,6 +797,13 @@ def convert_one_cit(
             log.info("[%s] SKIPPED (comp rules): %s", stem, violation)
             tracker.mark_skipped(cit_name, violation, metadata)
             return None
+
+    # ── HvH check (always enforced) ──────────────────────────────────────────
+    hvh_violation = check_hvh_metadata(metadata)
+    if hvh_violation:
+        log.info("[%s] SKIPPED (not HvH): %s", stem, hvh_violation)
+        tracker.mark_skipped(cit_name, f"not HvH: {hvh_violation}", metadata)
+        return None
 
     tracker.mark_started(cit_name, metadata)
 
