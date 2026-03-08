@@ -1053,12 +1053,22 @@ def convert_one_cit(
                      stem, m.group(1), m.group(2), m.group(3))
     except Exception:
         pass
-    log.info("[%s] Waiting %ds for CITF to flush to disk...", stem, int(post_end_wait))
-    time.sleep(post_end_wait)
+    # Poll for the CITF file rather than sleeping a fixed duration — zstd can finish
+    # in under a second, and early exit avoids holding a worker slot unnecessarily.
+    log.info("[%s] Waiting up to %ds for CITF to appear on disk...", stem, int(post_end_wait))
+    temp_citf = job_tmp / f"{stem}.citframes"
+    citf_wait_deadline = time.monotonic() + post_end_wait
+    while not temp_citf.exists() and time.monotonic() < citf_wait_deadline:
+        if proc.poll() is not None:
+            log.warning("[%s] Dolphin exited during CITF flush wait (code %s)", stem, proc.returncode)
+            break
+        time.sleep(1)
+    if temp_citf.exists():
+        elapsed = post_end_wait - max(0.0, citf_wait_deadline - time.monotonic())
+        log.info("[%s] CITF appeared after %.1fs", stem, elapsed)
 
     # Dolphin writes the CITF next to the staged CIT copy (in job_tmp).
     # Copy it to the original CIT's directory before we delete the temp dir.
-    temp_citf = job_tmp / f"{stem}.citframes"
     if temp_citf.exists():
         # Validate goal count and timestamps against output.json before accepting the CITF
         json_goal_times = metadata.get("json_goal_times", [])

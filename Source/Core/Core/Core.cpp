@@ -108,6 +108,10 @@ namespace Core
 {
 static bool boolMatchStart = false;
 static bool boolMatchEnd = false;
+// Sticky latch: set true when addressMatchEnd is seen as 1, cleared after EndCapture.
+// Prevents a race where replayStart clears 0x80400001 in the same frame that replayEnd
+// sets it, causing OnFrameEnd to miss the flag entirely.
+static bool s_match_end_latch = false;
 static bool wroteCodes = false;
 static bool customTrainingModeStart = false;
 static int customTrainingCurrentWait = 0;
@@ -348,6 +352,7 @@ void OnFrameEnd()
     // During replay playback, begin per-frame game state capture
     if (Movie::IsPlayingInput() && !GameStateCapture::IsCapturing())
     {
+      s_match_end_latch = false;  // reset stale latch from any previous match
       Core::DisplayMessage(fmt::format("CITF: BeginCapture stem='{}' dir='{}'",
                                        Movie::GetCITStemName(), Movie::GetCITDirPath()), 3000);
       GameStateCapture::BeginCapture();
@@ -482,13 +487,20 @@ void OnFrameEnd()
 
   //match end
 
+  // Latch the flag the moment we see it — replayStart can clear 0x80400001 in the same
+  // frame that replayEnd sets it, so we would miss the transition without a sticky bool.
   if (Memory::Read_U8(Metadata::addressMatchEnd) == 1)
+    s_match_end_latch = true;
+
+  if (s_match_end_latch)
   {
-    Core::DisplayMessage(fmt::format("CITF: match end fired: IsPlayingInput={} IsCapturing={} matchMode={}",
-                                     Movie::IsPlayingInput(), GameStateCapture::IsCapturing(), Metadata::getMatchMode()), 3000);
+    Core::DisplayMessage(fmt::format("CITF: match end fired: IsPlayingInput={} IsCapturing={} matchMode={} movieFrame={}",
+                                     Movie::IsPlayingInput(), GameStateCapture::IsCapturing(), Metadata::getMatchMode(),
+                                     Movie::GetCurrentFrame()), 3000);
     // training mode
     if (Memory::Read_U8(Metadata::addressCustomTrainingModeEnabled) && Metadata::getMatchMode() == 1 && !NetPlay::IsNetPlayRunning())
     {
+      s_match_end_latch = false;
       StateAuxillary::setOverwriteHomeCaptainPositionTrainingMode(false);
       StateAuxillary::setCustomTrainingModeStart(false);
       return;
@@ -504,10 +516,12 @@ void OnFrameEnd()
       std::string output_path = dir + basename + ".citframes";
       Core::DisplayMessage(fmt::format("CITF: EndCapture -> '{}'", output_path), 3000);
       GameStateCapture::EndCapture(output_path);
+      s_match_end_latch = false;
     }
     else
     {
       Core::DisplayMessage("CITF: match end fired but IsCapturing=false — CITF will not be written", 3000);
+      s_match_end_latch = false;
     }
 
     if (!StateAuxillary::getBoolMatchEnd() && !Movie::IsPlayingInput())
