@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstring>
+#include <thread>
 #include <vector>
 #include <zstd.h>
 
@@ -541,34 +542,35 @@ void GameStateCapture::EndCapture(const std::string& output_path)
     }
   }
 
-  // Compress with zstd (level 19 = max compression; fine since we compress once per match)
-  const size_t compress_bound = ZSTD_compressBound(raw.size());
-  std::vector<u8> compressed(compress_bound);
-  const size_t compressed_size =
-      ZSTD_compress(compressed.data(), compress_bound, raw.data(), raw.size(), 19);
-
-  if (ZSTD_isError(compressed_size))
-  {
-    ERROR_LOG_FMT(CORE, "GameStateCapture: zstd compression failed: {}",
-                  ZSTD_getErrorName(compressed_size));
-    s_frame_buffer.clear();
-    return;
-  }
-
-  File::IOFile file(output_path, "wb");
-  if (!file.IsOpen())
-  {
-    ERROR_LOG_FMT(CORE, "GameStateCapture: Failed to open output file: {}", output_path);
-    s_frame_buffer.clear();
-    return;
-  }
-
-  file.WriteBytes(compressed.data(), compressed_size);
-
-  INFO_LOG_FMT(CORE, "GameStateCapture: Wrote {} frames ({} bytes raw -> {} bytes compressed, "
-               "{:.1f}x ratio) to {}",
-               header.frameCount, raw.size(), compressed_size,
-               static_cast<float>(raw.size()) / compressed_size, output_path);
-
   s_frame_buffer.clear();
+
+  // Compress and write on a background thread — zstd level 19 can take 1-2s on a full match
+  u32 frame_count = header.frameCount;
+  std::thread([raw = std::move(raw), output_path, frame_count]() mutable {
+    const size_t compress_bound = ZSTD_compressBound(raw.size());
+    std::vector<u8> compressed(compress_bound);
+    const size_t compressed_size =
+        ZSTD_compress(compressed.data(), compress_bound, raw.data(), raw.size(), 19);
+
+    if (ZSTD_isError(compressed_size))
+    {
+      ERROR_LOG_FMT(CORE, "GameStateCapture: zstd compression failed: {}",
+                    ZSTD_getErrorName(compressed_size));
+      return;
+    }
+
+    File::IOFile file(output_path, "wb");
+    if (!file.IsOpen())
+    {
+      ERROR_LOG_FMT(CORE, "GameStateCapture: Failed to open output file: {}", output_path);
+      return;
+    }
+
+    file.WriteBytes(compressed.data(), compressed_size);
+
+    INFO_LOG_FMT(CORE, "GameStateCapture: Wrote {} frames ({} bytes raw -> {} bytes compressed, "
+                 "{:.1f}x ratio) to {}",
+                 frame_count, raw.size(), compressed_size,
+                 static_cast<float>(raw.size()) / compressed_size, output_path);
+  }).detach();
 }

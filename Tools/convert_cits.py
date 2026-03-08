@@ -48,6 +48,14 @@ try:
 except ImportError:
     _ZSTD_AVAILABLE = False
 
+# analyze_citf lives in the same directory as this script
+sys.path.insert(0, str(Path(__file__).parent))
+try:
+    from analyze_citf import load_citf_bytes, parse_header, parse_frame
+    _ANALYZE_AVAILABLE = True
+except ImportError:
+    _ANALYZE_AVAILABLE = False
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Configuration — edit these paths if your layout differs
 # ──────────────────────────────────────────────────────────────────────────────
@@ -235,6 +243,12 @@ def extract_cit_metadata(cit_path: Path) -> Dict:
                 meta["players"].append(p)
 
         meta["port_teams"] = obj.get("Controller Port Info", {})
+
+        # Goal timestamps: Goal Info[i][0] is the game-clock timestamp of the goal
+        left_goals  = [entry[0] for entry in obj.get("Left Team Goal Info",  []) if isinstance(entry, list) and entry]
+        right_goals = [entry[0] for entry in obj.get("Right Team Goal Info", []) if isinstance(entry, list) and entry]
+        meta["json_goal_times"] = sorted(left_goals + right_goals)
+
         return meta
 
     except Exception as exc:
@@ -750,6 +764,62 @@ def verify_citf(path: Path) -> Tuple[bool, str]:
     return True, f"OK ({size:,} bytes, zstd magic verified)"
 
 
+def validate_citf_goals(citf_path: Path, json_goal_times: List[float],
+                        tolerance: float = 0.1) -> Tuple[bool, str]:
+    """
+    Parse the CITF and derive goal timestamps from score-counter increments.
+    Assert that the count and per-goal timestamps (sorted) match those recorded
+    in output.json within `tolerance` seconds.
+
+    Returns (ok, message).
+    """
+    if not _ANALYZE_AVAILABLE:
+        return True, "analyze_citf not available — goal validation skipped"
+
+    try:
+        data = load_citf_bytes(str(citf_path))
+        hdr  = parse_header(data)
+
+        frames = []
+        offset = hdr.header_size
+        for _ in range(hdr.frame_count):
+            frame, consumed = parse_frame(data, offset, hdr.fixed_frame_size)
+            frames.append(frame)
+            offset += consumed
+
+        # Derive goals from score increments — no shooter attribution needed
+        citf_goal_times = []
+        for i in range(1, len(frames)):
+            if frames[i].left_score > frames[i - 1].left_score:
+                citf_goal_times.append(frames[i].game_time)
+            if frames[i].right_score > frames[i - 1].right_score:
+                citf_goal_times.append(frames[i].game_time)
+        citf_goal_times.sort()
+
+    except Exception as exc:
+        return False, f"CITF parse error during goal validation: {exc}"
+
+    n_citf = len(citf_goal_times)
+    n_json = len(json_goal_times)
+
+    if n_citf != n_json:
+        return False, (
+            f"goal count mismatch: CITF has {n_citf}, output.json has {n_json} "
+            f"(CITF={citf_goal_times}, JSON={json_goal_times})"
+        )
+
+    mismatches = []
+    for i, (ct, jt) in enumerate(zip(citf_goal_times, json_goal_times)):
+        diff = abs(ct - jt)
+        if diff > tolerance:
+            mismatches.append(f"goal {i+1}: CITF={ct:.3f}s JSON={jt:.3f}s diff={diff:.3f}s")
+
+    if mismatches:
+        return False, "goal timestamp mismatch(es): " + "; ".join(mismatches)
+
+    return True, f"{n_citf} goal(s) validated (timestamps within {tolerance}s)"
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Single CIT conversion worker
 # ──────────────────────────────────────────────────────────────────────────────
@@ -843,7 +913,9 @@ def convert_one_cit(
         return False
 
     # ── Launch Dolphin ────────────────────────────────────────────────────────
-    cmd = [DOLPHIN_EXE, "-m", str(cit_copy), "-e", ISO_PATH, "-p", "headless"]
+    cmd = [DOLPHIN_EXE, "-m", str(cit_copy), "-e", ISO_PATH]
+    if sys.platform != "win32":
+        cmd += ["-p", "headless"]
     log.info("[%s] Launching: %s -m \"%s\" ...", stem, DOLPHIN_EXE, cit_name)
 
     dolphin_log = job_tmp / "dolphin.log"
@@ -988,6 +1060,17 @@ def convert_one_cit(
     # Copy it to the original CIT's directory before we delete the temp dir.
     temp_citf = job_tmp / f"{stem}.citframes"
     if temp_citf.exists():
+        # Validate goal count and timestamps against output.json before accepting the CITF
+        json_goal_times = metadata.get("json_goal_times", [])
+        goal_ok, goal_msg = validate_citf_goals(temp_citf, json_goal_times)
+        if goal_ok:
+            log.info("[%s] Goal validation: %s", stem, goal_msg)
+        else:
+            log.error("[%s] Goal validation FAILED: %s", stem, goal_msg)
+            _cleanup(proc, reader, job_tmp)
+            tracker.mark_failed(cit_name, f"goal validation failed: {goal_msg}")
+            return False
+
         try:
             shutil.copy2(temp_citf, expected_citf)
             log.info("[%s] Copied CITF from temp dir to %s", stem, expected_citf)

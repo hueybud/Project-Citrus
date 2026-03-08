@@ -690,6 +690,29 @@ def detect_shots_v8(frames):
             })
 
     shots.sort(key=lambda s: s['frame'])
+
+    # Deduplicate: multiple shots within 120 frames of the same goal all get
+    # marked made=True naively. Re-attribute using ground-truth score changes so
+    # each actual goal credits exactly one shot (the last on that team before the
+    # score change).
+    goal_events = []
+    for j in range(1, len(frames)):
+        if frames[j].left_score > frames[j - 1].left_score:
+            goal_events.append((j, 'left'))
+        if frames[j].right_score > frames[j - 1].right_score:
+            goal_events.append((j, 'right'))
+
+    for s in shots:
+        s['made'] = False
+
+    for goal_frame, team in goal_events:
+        candidates = [
+            s for s in shots
+            if s['shooter_team'] == team and goal_frame - 120 <= s['frame'] <= goal_frame
+        ]
+        if candidates:
+            max(candidates, key=lambda s: s['frame'])['made'] = True
+
     return shots
 
 
