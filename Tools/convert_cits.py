@@ -1149,6 +1149,8 @@ def main() -> None:
                         help="Re-attempt CITs previously marked as failed")
     parser.add_argument("--retry-skipped",     action="store_true",
                         help="Re-attempt CITs previously skipped by --enforce-comp-rules")
+    parser.add_argument("--retry-all",         action="store_true",
+                        help="Re-attempt all CITs regardless of previous status (success, failed, or skipped)")
     parser.add_argument("--dry-run",           action="store_true",
                         help="Enumerate and log CITs without launching Dolphin")
     parser.add_argument("--debug",             action="store_true",
@@ -1226,16 +1228,21 @@ def main() -> None:
     for cit in cit_files:
         status = tracker.get_status(cit.name)
         if status == "success":
-            skip_success += 1
+            if args.retry_all:
+                log.info("Retrying previously-successful: %s", cit.name)
+                tracker.reset_job(cit.name)
+                pending.append(cit)
+            else:
+                skip_success += 1
         elif status == "failed":
-            if args.retry_failed:
+            if args.retry_failed or args.retry_all:
                 log.info("Retrying previously-failed: %s", cit.name)
                 tracker.reset_job(cit.name)
                 pending.append(cit)
             else:
                 skip_failed += 1
         elif status == "skipped":
-            if args.retry_skipped:
+            if args.retry_skipped or args.retry_all:
                 log.info("Retrying previously-skipped: %s", cit.name)
                 tracker.reset_job(cit.name)
                 pending.append(cit)
@@ -1250,10 +1257,12 @@ def main() -> None:
             pending.append(cit)
 
     skipped_hints = []
-    if skip_failed and not args.retry_failed:
+    if skip_failed and not args.retry_failed and not args.retry_all:
         skipped_hints.append("use --retry-failed to re-attempt failed")
-    if skip_skipped and not args.retry_skipped:
+    if skip_skipped and not args.retry_skipped and not args.retry_all:
         skipped_hints.append("use --retry-skipped to re-attempt skipped")
+    if skip_success and not args.retry_all:
+        skipped_hints.append("use --retry-all to re-attempt everything including successes")
 
     log.info(
         "Skipped %d already-successful, %d previously-failed, %d previously-skipped%s | %d to process",
