@@ -118,6 +118,7 @@ RUN ldconfig
 
 # ── Conversion script ─────────────────────────────────────────────────────────
 COPY Tools/convert_cits.py /usr/local/bin/convert_cits.py
+COPY Tools/analyze_citf.py /usr/local/bin/analyze_citf.py
 RUN chmod +x /usr/local/bin/convert_cits.py
 
 # ── Dolphin config ────────────────────────────────────────────────────────────

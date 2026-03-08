@@ -1083,6 +1083,18 @@ def convert_one_cit(
     else:
         log.warning("[%s] CITF not found in temp dir (%s) — may have been written elsewhere",
                     stem, temp_citf)
+        # Dump CITF-related lines from dolphin.log to help diagnose why capture didn't start
+        try:
+            dlog = job_tmp / "dolphin.log"
+            if dlog.exists():
+                citf_lines = [l.rstrip() for l in dlog.read_text(errors="replace").splitlines()
+                              if "CITF" in l or "GameStateCapture" in l]
+                if citf_lines:
+                    log.warning("[%s] dolphin.log CITF lines:\n%s", stem, "\n".join(citf_lines[-30:]))
+                else:
+                    log.warning("[%s] dolphin.log has no CITF lines (capture hooks may not have fired)", stem)
+        except Exception as exc:
+            log.warning("[%s] Could not read dolphin.log: %s", stem, exc)
 
     _cleanup(proc, reader, job_tmp)
 
