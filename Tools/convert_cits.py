@@ -906,7 +906,7 @@ def convert_one_cit(
         shutil.copy2(cit_path, cit_copy)
         log.info("[%s] Staged to %s", stem, job_tmp)
     except Exception as exc:
-        # shutil.rmtree(job_tmp, ignore_errors=True)  # DEBUG: keep temp dirs for dolphin.log inspection
+        shutil.rmtree(job_tmp, ignore_errors=True)
         reason = f"could not stage CIT: {exc}"
         log.error("[%s] %s", stem, reason)
         tracker.mark_failed(cit_name, reason)
@@ -923,7 +923,7 @@ def convert_one_cit(
         with open(dolphin_log, 'w') as dlf:
             proc = subprocess.Popen(cmd, stdout=dlf, stderr=dlf)
     except Exception as exc:
-        # shutil.rmtree(job_tmp, ignore_errors=True)  # DEBUG: keep temp dirs for dolphin.log inspection
+        shutil.rmtree(job_tmp, ignore_errors=True)
         reason = f"could not launch Dolphin: {exc}"
         log.error("[%s] %s", stem, reason)
         tracker.mark_failed(cit_name, reason)
@@ -941,7 +941,7 @@ def convert_one_cit(
                 log.error("[%s] Dolphin output:\n%s", stem, dolphin_output)
         except Exception:
             pass
-        # shutil.rmtree(job_tmp, ignore_errors=True)  # DEBUG: keep temp dirs for dolphin.log inspection
+        shutil.rmtree(job_tmp, ignore_errors=True)
         reason = f"Dolphin exited during startup (code {proc.returncode})"
         log.error("[%s] %s", stem, reason)
         tracker.mark_failed(cit_name, reason)
@@ -1132,7 +1132,7 @@ def _cleanup(proc: subprocess.Popen, reader: DolphinMemoryReader, job_tmp: Path)
             log.warning("Dolphin PID %d did not exit on SIGTERM — killing", proc.pid)
             proc.kill()
             proc.wait()
-    # shutil.rmtree(job_tmp, ignore_errors=True)  # DEBUG: keep temp dirs for dolphin.log inspection
+    shutil.rmtree(job_tmp, ignore_errors=True)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
