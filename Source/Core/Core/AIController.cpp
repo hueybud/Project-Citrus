@@ -8,6 +8,7 @@
 #include "Core/AIController.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstring>
 #include <numeric>
@@ -348,11 +349,33 @@ void AIController::OnFrameEnd(int controlled_port, bool mirror_x)
     m_prev_labels.fill(0.0f);
   }
 
+  auto t_frame_start = std::chrono::steady_clock::now();
   std::vector<float> features = ReadGameState(controlled_port, mirror_x);
+  auto t_gs_end = std::chrono::steady_clock::now();
   if (features.empty())
   {
     m_match_active = false;
     return;
+  }
+
+  // Log a sample of raw feature values every 120 frames to check they are non-zero
+  {
+    static int s_feat_counter = 0;
+    if (++s_feat_counter % 120 == 1)
+    {
+      // Print feat[0..7] (ball), feat[19] (self_pos_z), feat[FEATURE_DIM-10..FEATURE_DIM-1] (prev_labels)
+      const int N = FEATURE_DIM;
+      INFO_LOG_FMT(CORE,
+                   "AIController feat[0..7]: {:.3f} {:.3f} {:.3f} {:.3f} {:.3f} {:.3f} {:.3f} {:.3f}",
+                   features[0], features[1], features[2], features[3],
+                   features[4], features[5], features[6], features[7]);
+      INFO_LOG_FMT(CORE,
+                   "AIController feat[432..441] (prev_labels): "
+                   "{:.2f} {:.2f} {:.2f} {:.2f} {:.2f} {:.2f} {:.3f} {:.3f} {:.3f} {:.3f}",
+                   features[N-10], features[N-9], features[N-8], features[N-7],
+                   features[N-6], features[N-5], features[N-4], features[N-3],
+                   features[N-2], features[N-1]);
+    }
   }
 
   try
@@ -375,12 +398,34 @@ void AIController::OnFrameEnd(int controlled_port, bool mirror_x)
     const char* input_names[]  = {"features", "kv_cache_in"};
     const char* output_names[] = {"btn_probs", "stick_vals", "kv_cache_out"};
 
+    auto t0 = std::chrono::steady_clock::now();
     auto outputs = m_session->Run(Ort::RunOptions{nullptr},
                                   input_names, inputs.data(), 2,
                                   output_names, 3);
+    auto t1 = std::chrono::steady_clock::now();
+    static int s_infer_counter = 0;
+    if (++s_infer_counter % 120 == 1)
+    {
+      float ms_gs    = std::chrono::duration<float, std::milli>(t_gs_end - t_frame_start).count();
+      float ms_infer = std::chrono::duration<float, std::milli>(t1 - t0).count();
+      float ms_total = std::chrono::duration<float, std::milli>(t1 - t_frame_start).count();
+      INFO_LOG_FMT(CORE, "AIController timing: gs={:.2f}ms  infer={:.2f}ms  total={:.2f}ms",
+                   ms_gs, ms_infer, ms_total);
+    }
 
     const float* btn_probs  = outputs[0].GetTensorData<float>();
     const float* stick_vals = outputs[1].GetTensorData<float>();
+
+    // Log raw model outputs every 120 frames to diagnose stick prediction
+    if (s_infer_counter % 120 == 1)
+    {
+      INFO_LOG_FMT(CORE,
+                   "AIController raw: btn=[{:.2f},{:.2f},{:.2f},{:.2f},{:.2f},{:.2f}] "
+                   "stk=[{:.3f},{:.3f},{:.3f},{:.3f}]",
+                   btn_probs[0], btn_probs[1], btn_probs[2], btn_probs[3],
+                   btn_probs[4], btn_probs[5],
+                   stick_vals[0], stick_vals[1], stick_vals[2], stick_vals[3]);
+    }
 
     m_last_output  = DecodeOutput(btn_probs, stick_vals, mirror_x);
     m_match_active = true;
@@ -389,18 +434,11 @@ void AIController::OnFrameEnd(int controlled_port, bool mirror_x)
     const float* kv_out = outputs[2].GetTensorData<float>();
     std::copy(kv_out, kv_out + KV_CACHE_SIZE, m_kv_cache.begin());
 
-    // Store this frame's output as prev_labels for next frame's feature vector.
-    // stick_vals from the model are in canonical (attacks-right) space — store directly.
-    m_prev_labels[0] = btn_probs[0] > 0.5f ? 1.0f : 0.0f;  // A
-    m_prev_labels[1] = btn_probs[1] > 0.5f ? 1.0f : 0.0f;  // B
-    m_prev_labels[2] = btn_probs[2] > 0.5f ? 1.0f : 0.0f;  // X
-    m_prev_labels[3] = btn_probs[3] > 0.5f ? 1.0f : 0.0f;  // Y
-    m_prev_labels[4] = btn_probs[4] > 0.5f ? 1.0f : 0.0f;  // L
-    m_prev_labels[5] = btn_probs[5] > 0.5f ? 1.0f : 0.0f;  // R
-    m_prev_labels[6] = stick_vals[0];  // stick_x  (canonical space)
-    m_prev_labels[7] = stick_vals[1];  // stick_y
-    m_prev_labels[8] = stick_vals[2];  // cstick_x
-    m_prev_labels[9] = stick_vals[3];  // cstick_y
+    // NOTE: prev_labels intentionally kept as zeros (not updated with model output).
+    // Feeding the model's own predictions back as context creates a feedback loop
+    // that locks into degenerate fixed points (e.g. all buttons pressed, neutral
+    // sticks).  The temporal KV cache provides sufficient cross-frame context.
+    // TODO: revisit once training uses scheduled sampling.
   }
   catch (const Ort::Exception& e)
   {
@@ -505,6 +543,20 @@ std::vector<float> AIController::ReadGameState(int controlled_port, bool mirror_
   float game_time = acc->ReadF32(Metadata::addressTimeElapsed);
   float match_time_allotted = static_cast<float>(
       std::max(Memory::Read_U32(Metadata::addressMatchTimeAllotted), 1u));
+
+  // ── Debug: log key game state reads every 120 frames ──────────────────────
+  static int s_dbg_counter = 0;
+  if (++s_dbg_counter % 120 == 1)
+  {
+    INFO_LOG_FMT(CORE, "AIController GS: ball_ptr={:#010x} bpx={:.2f} bpy={:.2f} "
+                 "self_slot={} self_pos=({:.2f},{:.2f}) is_uc={}",
+                 ball_ptr, bpx, bpy, self_slot,
+                 mx(chars[self_slot].pos_x), chars[self_slot].pos_y,
+                 chars[self_slot].is_user_controlled);
+    INFO_LOG_FMT(CORE, "AIController GS: char_ptrs[0]={:#010x} char_ptrs[4]={:#010x} "
+                 "score={} game_time={:.1f}",
+                 char_ptrs[0], char_ptrs[4], score_diff, game_time);
+  }
 
   // ── Build feature vector ───────────────────────────────────────────────────
   std::vector<float> feat;
