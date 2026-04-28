@@ -1,8 +1,8 @@
 // Copyright 2026 Citrus Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 //
-// AIController: ONNX Runtime inference for the CitrusTransformerBC model.
-// Feature extraction mirrors Tools/build_dataset.py::extract_features() exactly.
+// AIController: ONNX Runtime inference for the CitrusTransformerBC model (v6).
+// Feature extraction mirrors SMS AI/scripts/build_dataset.py::extract_features() exactly.
 // KV cache carries temporal context across frames within a play segment.
 
 #include "Core/AIController.h"
@@ -13,6 +13,7 @@
 #include <cstring>
 #include <numeric>
 #include <stdexcept>
+#include <utility>
 
 #include "Common/Logging/Log.h"
 #include "Core/HW/AddressSpace.h"
@@ -32,6 +33,8 @@
 
 namespace Movie
 {
+
+// Stochastic sampling RNG for button presses (Bernoulli policy).
 
 // ---------------------------------------------------------------------------
 // Action state vocabs (must stay in sync with build_dataset.py)
@@ -55,48 +58,40 @@ static constexpr int GOALIE_STATE_DIM  = 27;  // 26 known + 1 other
 static constexpr int EFFECT_DIM        = 5;
 static constexpr int SPEED_ITEM_DIM    = 3;
 static constexpr int POWERUP_DIM       = 10;
-
-static constexpr int BUTTON_DIM = 6;
-static constexpr int STICK_DIM  = 4;
+static constexpr int FIELD_ITEM_K      = 4;   // top-K nearest items
+static constexpr int FIELD_ITEM_DIM    = 8;   // type(1) + Δpos(3) + vel(3) + strength(1)
 
 // ---------------------------------------------------------------------------
-// One-hot helpers
+// v6 helpers — integer index (for model embedding) instead of one-hot
 // ---------------------------------------------------------------------------
 
+static float StrikerStateIdx(uint32_t state)
+{
+  for (int i = 0; i < static_cast<int>(STRIKER_VOCAB.size()); i++)
+  {
+    if (STRIKER_VOCAB[i] == state)
+      return static_cast<float>(i);
+  }
+  return static_cast<float>(STRIKER_STATE_DIM - 1);  // unknown → last bucket
+}
+
+static float GoalieStateIdx(uint32_t state)
+{
+  for (int i = 0; i < static_cast<int>(GOALIE_VOCAB.size()); i++)
+  {
+    if (GOALIE_VOCAB[i] == state)
+      return static_cast<float>(i);
+  }
+  return static_cast<float>(GOALIE_STATE_DIM - 1);  // unknown → last bucket
+}
+
+// One-hot helpers (still used for effect, speed_item, powerup, ball_owner)
 static void AppendOneHot(std::vector<float>& out, int idx, int dim)
 {
   int start = static_cast<int>(out.size());
   out.resize(start + dim, 0.0f);
   if (idx >= 0 && idx < dim)
     out[start + idx] = 1.0f;
-}
-
-static void AppendStrikerStateOH(std::vector<float>& out, uint32_t state)
-{
-  int idx = STRIKER_STATE_DIM - 1;
-  for (int i = 0; i < static_cast<int>(STRIKER_VOCAB.size()); i++)
-  {
-    if (STRIKER_VOCAB[i] == state)
-    {
-      idx = i;
-      break;
-    }
-  }
-  AppendOneHot(out, idx, STRIKER_STATE_DIM);
-}
-
-static void AppendGoalieStateOH(std::vector<float>& out, uint32_t state)
-{
-  int idx = GOALIE_STATE_DIM - 1;
-  for (int i = 0; i < static_cast<int>(GOALIE_VOCAB.size()); i++)
-  {
-    if (GOALIE_VOCAB[i] == state)
-    {
-      idx = i;
-      break;
-    }
-  }
-  AppendOneHot(out, idx, GOALIE_STATE_DIM);
 }
 
 static void AppendEffectOH(std::vector<float>& out, int effect_type)
@@ -183,6 +178,44 @@ static CharData ReadCharacter(const AddressSpace::Accessors* acc, uint32_t char_
 }
 
 // ---------------------------------------------------------------------------
+// Field item read helper (mirrors GameStateFrame.cpp ReadItems)
+// ---------------------------------------------------------------------------
+
+struct FieldItem
+{
+  float pos_x, pos_y, pos_z;
+  float vel_x, vel_y, vel_z;
+  int   powerup_type;
+  int   strength_level;
+};
+
+static constexpr int MAX_ACTIVE_ITEMS = 25;
+
+static std::vector<FieldItem> ReadFieldItems(const AddressSpace::Accessors* acc)
+{
+  std::vector<FieldItem> items;
+  for (int i = 0; i < MAX_ACTIVE_ITEMS; i++)
+  {
+    uint32_t item_ptr = Memory::Read_U32(
+        Metadata::addressActivePowerupArray + static_cast<uint32_t>(i) * 4);
+    if (item_ptr == 0)
+      continue;
+
+    FieldItem fi{};
+    fi.pos_x          = acc->ReadF32(item_ptr + 0x2C);
+    fi.pos_y          = acc->ReadF32(item_ptr + 0x30);
+    fi.pos_z          = acc->ReadF32(item_ptr + 0x34);
+    fi.vel_x          = acc->ReadF32(item_ptr + 0x44);
+    fi.vel_y          = acc->ReadF32(item_ptr + 0x48);
+    fi.vel_z          = acc->ReadF32(item_ptr + 0x4C);
+    fi.powerup_type   = static_cast<int>(Memory::Read_U32(item_ptr + 0x18));
+    fi.strength_level = static_cast<int>(Memory::Read_U32(item_ptr + 0x6C));
+    items.push_back(fi);
+  }
+  return items;
+}
+
+// ---------------------------------------------------------------------------
 // Inventory slot
 // ---------------------------------------------------------------------------
 
@@ -227,9 +260,9 @@ bool AIController::Load(const std::string& onnx_path)
     m_session = std::make_unique<Ort::Session>(*m_env, onnx_path.c_str(), opts);
 #endif
 
-    // Validate expected I/O:
-    //   inputs:  features [1, FEATURE_DIM], kv_cache_in [3, 2, 1, 63, 512]
-    //   outputs: btn_probs [1, 6], stick_vals [1, 4], kv_cache_out [3, 2, 1, 63, 512]
+    // Validate expected I/O (v6):
+    //   inputs:  features [1, 194], kv_cache_in [3, 2, 1, 127, 512]
+    //   outputs: btn_probs [1, 7], stick_vals [1, 4], kv_cache_out [3, 2, 1, 127, 512]
     size_t num_inputs  = m_session->GetInputCount();
     size_t num_outputs = m_session->GetOutputCount();
 
@@ -271,7 +304,7 @@ bool AIController::Load(const std::string& onnx_path)
     }
 
     m_loaded = true;
-    INFO_LOG_FMT(CORE, "AIController: loaded transformer model from {}", onnx_path);
+    INFO_LOG_FMT(CORE, "AIController: loaded v6 transformer model from {}", onnx_path);
     return true;
   }
   catch (const Ort::Exception& e)
@@ -358,23 +391,25 @@ void AIController::OnFrameEnd(int controlled_port, bool mirror_x)
     return;
   }
 
-  // Log a sample of raw feature values every 120 frames to check they are non-zero
+  // Log a sample of raw feature values every 120 frames
   {
     static int s_feat_counter = 0;
     if (++s_feat_counter % 120 == 1)
     {
-      // Print feat[0..7] (ball), feat[19] (self_pos_z), feat[FEATURE_DIM-10..FEATURE_DIM-1] (prev_labels)
       const int N = FEATURE_DIM;
       INFO_LOG_FMT(CORE,
-                   "AIController feat[0..7]: {:.3f} {:.3f} {:.3f} {:.3f} {:.3f} {:.3f} {:.3f} {:.3f}",
+                   "AIController feat[0..10]: {:.3f} {:.3f} {:.3f} {:.3f} {:.3f} "
+                   "{:.3f} {:.3f} {:.3f} {:.3f} {:.3f} {:.3f}",
                    features[0], features[1], features[2], features[3],
-                   features[4], features[5], features[6], features[7]);
+                   features[4], features[5], features[6], features[7],
+                   features[8], features[9], features[10]);
       INFO_LOG_FMT(CORE,
-                   "AIController feat[432..441] (prev_labels): "
-                   "{:.2f} {:.2f} {:.2f} {:.2f} {:.2f} {:.2f} {:.3f} {:.3f} {:.3f} {:.3f}",
-                   features[N-10], features[N-9], features[N-8], features[N-7],
-                   features[N-6], features[N-5], features[N-4], features[N-3],
-                   features[N-2], features[N-1]);
+                   "AIController feat[183..193] (prev_labels): "
+                   "{:.2f} {:.2f} {:.2f} {:.2f} {:.2f} {:.2f} {:.2f} "
+                   "{:.3f} {:.3f} {:.3f} {:.3f}",
+                   features[N-11], features[N-10], features[N-9], features[N-8],
+                   features[N-7], features[N-6], features[N-5],
+                   features[N-4], features[N-3], features[N-2], features[N-1]);
     }
   }
 
@@ -416,29 +451,55 @@ void AIController::OnFrameEnd(int controlled_port, bool mirror_x)
     const float* btn_probs  = outputs[0].GetTensorData<float>();
     const float* stick_vals = outputs[1].GetTensorData<float>();
 
-    // Log raw model outputs every 120 frames to diagnose stick prediction
+    // Log raw model outputs every 120 frames (v6: 7 buttons)
     if (s_infer_counter % 120 == 1)
     {
       INFO_LOG_FMT(CORE,
-                   "AIController raw: btn=[{:.2f},{:.2f},{:.2f},{:.2f},{:.2f},{:.2f}] "
+                   "AIController raw: btn=[{:.2f},{:.2f},{:.2f},{:.2f},{:.2f},{:.2f},{:.2f}] "
                    "stk=[{:.3f},{:.3f},{:.3f},{:.3f}]",
                    btn_probs[0], btn_probs[1], btn_probs[2], btn_probs[3],
-                   btn_probs[4], btn_probs[5],
+                   btn_probs[4], btn_probs[5], btn_probs[6],
                    stick_vals[0], stick_vals[1], stick_vals[2], stick_vals[3]);
     }
 
     m_last_output  = DecodeOutput(btn_probs, stick_vals, mirror_x);
     m_match_active = true;
 
+    // Per-frame log: actual pad status delivered to the game.
+    {
+      const auto& p = m_last_output;
+      INFO_LOG_FMT(CORE,
+                   "AI pad: {}{}{}{}{}{}{}  stk=({},{}) cstic=({},{})  raw=[{:.2f},{:.2f},{:.2f},"
+                   "{:.2f},{:.2f},{:.2f},{:.2f}]",
+                   (p.button & PAD_BUTTON_A)   ? "A" : ".",
+                   (p.button & PAD_BUTTON_B)   ? "B" : ".",
+                   (p.button & PAD_BUTTON_X)   ? "X" : ".",
+                   (p.button & PAD_BUTTON_Y)   ? "Y" : ".",
+                   (p.button & PAD_TRIGGER_L)  ? "L" : ".",
+                   (p.button & PAD_TRIGGER_R)  ? "R" : ".",
+                   (p.button & PAD_BUTTON_START) ? "S" : ".",
+                   p.stickX, p.stickY, p.substickX, p.substickY,
+                   btn_probs[0], btn_probs[1], btn_probs[2], btn_probs[3],
+                   btn_probs[4], btn_probs[5], btn_probs[6]);
+    }
+
     // Carry KV cache forward to next frame
     const float* kv_out = outputs[2].GetTensorData<float>();
     std::copy(kv_out, kv_out + KV_CACHE_SIZE, m_kv_cache.begin());
 
-    // NOTE: prev_labels intentionally kept as zeros (not updated with model output).
-    // Feeding the model's own predictions back as context creates a feedback loop
-    // that locks into degenerate fixed points (e.g. all buttons pressed, neutral
-    // sticks).  The temporal KV cache provides sufficient cross-frame context.
-    // TODO: revisit once training uses scheduled sampling.
+    // v6: populate prev_labels from the actual pad status sent to the game.
+    // This matches the sampled button decisions from DecodeOutput, avoiding a
+    // second independent random draw that would disagree with what was pressed.
+    const auto& p = m_last_output;
+    m_prev_labels[0] = (p.button & PAD_BUTTON_A)  ? 1.0f : 0.0f;
+    m_prev_labels[1] = (p.button & PAD_BUTTON_B)  ? 1.0f : 0.0f;
+    m_prev_labels[2] = (p.button & PAD_BUTTON_X)  ? 1.0f : 0.0f;
+    m_prev_labels[3] = (p.button & PAD_BUTTON_Y)  ? 1.0f : 0.0f;
+    m_prev_labels[4] = (p.button & PAD_TRIGGER_L) && (p.button & PAD_BUTTON_A) ? 1.0f : 0.0f;
+    m_prev_labels[5] = (p.button & PAD_TRIGGER_L) && (p.button & PAD_BUTTON_B) ? 1.0f : 0.0f;
+    m_prev_labels[6] = (p.button & PAD_TRIGGER_R) ? 1.0f : 0.0f;
+    for (int i = 0; i < STICK_DIM_OUT; i++)
+      m_prev_labels[BUTTON_DIM_OUT + i] = stick_vals[i];
   }
   catch (const Ort::Exception& e)
   {
@@ -448,8 +509,27 @@ void AIController::OnFrameEnd(int controlled_port, bool mirror_x)
 }
 
 // ---------------------------------------------------------------------------
-// Feature extraction — mirrors build_dataset.py::extract_features() exactly
+// Feature extraction — mirrors build_dataset.py::extract_features() v6 exactly
 // ---------------------------------------------------------------------------
+// Layout (194 total = 183 core + 11 prev_labels):
+//   1. Ball (11): pos(3) + vel(3) + charge(1) + perfect_pass(1) + ball_to_goal(3)
+//   2. Ball owner one-hot (11)
+//   3. Self character (19): Δpos(3) + state_idx(1) + heading(2) + goal(3)
+//      + effect_oh(5) + speed_item_oh(3) + item_timer(1) + is_carrier(1)
+//   4. 3 friendly strikers (7 × 3 = 21): Δpos(3) + state_idx(1) + heading(2)
+//      + is_carrier(1)
+//   5. Friendly goalie (4): Δpos(3) + state_idx(1)
+//   6. 4 enemy strikers (7 × 4 = 28): Δpos(3) + state_idx(1) + heading(2)
+//      + is_carrier(1)
+//   7. Enemy goalie (4): Δpos(3) + state_idx(1)
+//   8. Own inventory (2 × 11 = 22)
+//   9. Enemy inventory (2 × 11 = 22)
+//  10. 4 nearest field items (8 × 4 = 32): type_idx(1) + Δpos(3) + vel(3)
+//      + strength(1)
+//  11. Tactical summary (5)
+//  12. Possession booleans (2)
+//  13. Phase booleans (2): is_kickoff + goalie_has_ball
+//  14. Previous frame action (11): 7 buttons + 4 sticks
 
 std::vector<float> AIController::ReadGameState(int controlled_port, bool mirror_x) const
 {
@@ -534,35 +614,29 @@ std::vector<float> AIController::ReadGameState(int controlled_port, bool mirror_
   uint32_t own_team_ptr   = mirror_x ? right_team_ptr : left_team_ptr;
   uint32_t enemy_team_ptr = mirror_x ? left_team_ptr  : right_team_ptr;
 
-  int left_score  = static_cast<int>(Memory::Read_U16(Metadata::addressLeftSideScore));
-  int right_score = static_cast<int>(Memory::Read_U16(Metadata::addressRightSideScore));
-  int score_diff  = left_score - right_score;
-  if (mirror_x)
-    score_diff = -score_diff;
+  // Read game phase for is_kickoff feature
+  constexpr uint32_t CGAME_SINGLETON = 0x80373708;
+  uint32_t cGamePtr   = Memory::Read_U32(CGAME_SINGLETON);
+  uint32_t game_phase = (cGamePtr != 0) ? Memory::Read_U32(cGamePtr + 0x24) : 0;
 
-  float game_time = acc->ReadF32(Metadata::addressTimeElapsed);
-  float match_time_allotted = static_cast<float>(
-      std::max(Memory::Read_U32(Metadata::addressMatchTimeAllotted), 1u));
+  // Self position (needed for field items + tactical)
+  float sc_px = mx(chars[self_slot].pos_x);
+  float sc_py = chars[self_slot].pos_y;
 
-  // ── Debug: log key game state reads every 120 frames ──────────────────────
+  // Debug: log key game state reads every 120 frames
   static int s_dbg_counter = 0;
   if (++s_dbg_counter % 120 == 1)
   {
     INFO_LOG_FMT(CORE, "AIController GS: ball_ptr={:#010x} bpx={:.2f} bpy={:.2f} "
-                 "self_slot={} self_pos=({:.2f},{:.2f}) is_uc={}",
-                 ball_ptr, bpx, bpy, self_slot,
-                 mx(chars[self_slot].pos_x), chars[self_slot].pos_y,
-                 chars[self_slot].is_user_controlled);
-    INFO_LOG_FMT(CORE, "AIController GS: char_ptrs[0]={:#010x} char_ptrs[4]={:#010x} "
-                 "score={} game_time={:.1f}",
-                 char_ptrs[0], char_ptrs[4], score_diff, game_time);
+                 "self_slot={} self_pos=({:.2f},{:.2f}) phase={}",
+                 ball_ptr, bpx, bpy, self_slot, sc_px, sc_py, game_phase);
   }
 
-  // ── Build feature vector ───────────────────────────────────────────────────
+  // ── Build feature vector (194 dims) ────────────────────────────────────────
   std::vector<float> feat;
   feat.reserve(FEATURE_DIM);
 
-  // --- 1. Ball (8) ---
+  // --- 1. Ball (11) ---
   feat.push_back(bpx);
   feat.push_back(bpy);
   feat.push_back(bpz);
@@ -571,16 +645,22 @@ std::vector<float> AIController::ReadGameState(int controlled_port, bool mirror_
   feat.push_back(bvz);
   feat.push_back(ball_charge / 35.0f);
   feat.push_back(is_perfect_pass ? 1.0f : 0.0f);
+  // Ball-to-goal geometry (v6)
+  {
+    float b2g_dx   = goal_x - bpx;
+    float b2g_dy   = 0.0f - bpy;
+    float b2g_dist = std::sqrt(b2g_dx * b2g_dx + b2g_dy * b2g_dy) + 1e-6f;
+    feat.push_back(b2g_dist / 40.0f);
+    feat.push_back(b2g_dx / b2g_dist);
+    feat.push_back(b2g_dy / b2g_dist);
+  }
 
   // --- 2. Ball owner one-hot (11) ---
   AppendOneHot(feat, owner_slot, 11);
 
-  // --- 3. Self character (48) ---
+  // --- 3. Self character (19) ---
   {
     const CharData& sc = chars[self_slot];
-    float sc_px = mx(sc.pos_x);
-    float sc_py = sc.pos_y;
-
     float dx   = goal_x - sc_px;
     float dy   = sc_py;
     float dist = std::sqrt(dx * dx + dy * dy) + 1e-6f;
@@ -589,22 +669,22 @@ std::vector<float> AIController::ReadGameState(int controlled_port, bool mirror_
     if (mirror_x)
       cos_h = -cos_h;
 
-    feat.push_back(sc_px - bpx);
+    feat.push_back(sc_px - bpx);                         // Δpos to ball (3)
     feat.push_back(sc_py - bpy);
     feat.push_back(sc.pos_z);
-    AppendStrikerStateOH(feat, sc.action_state);
-    feat.push_back(sin_h);
+    feat.push_back(StrikerStateIdx(sc.action_state));     // state index (1)
+    feat.push_back(sin_h);                                // heading (2)
     feat.push_back(cos_h);
-    feat.push_back(dist / 40.0f);
+    feat.push_back(dist / 40.0f);                         // goal dist+angle (3)
     feat.push_back(dx / dist);
     feat.push_back(dy / dist);
-    AppendEffectOH(feat, sc.effect_type);
-    AppendSpeedItemOH(feat, sc.speed_item_type);
-    feat.push_back(sc.speed_item_timer / 10.0f);
-    feat.push_back(self_slot == owner_slot ? 1.0f : 0.0f);
+    AppendEffectOH(feat, sc.effect_type);                 // effect (5)
+    AppendSpeedItemOH(feat, sc.speed_item_type);          // speed item (3)
+    feat.push_back(sc.speed_item_timer / 10.0f);          // item timer (1)
+    feat.push_back(self_slot == owner_slot ? 1.0f : 0.0f);  // is ball carrier (1)
   }
 
-  // --- 4. 3 other friendly strikers sorted by distance to ball (3 × 36 = 108) ---
+  // --- 4. 3 other friendly strikers sorted by distance to ball (3 × 7 = 21) ---
   {
     struct SlotDist { int slot; float dist2; };
     SlotDist others[3];
@@ -631,32 +711,32 @@ std::vector<float> AIController::ReadGameState(int controlled_port, bool mirror_
         auto [sh, ch_cos] = HeadingSinCos(ch.heading);
         if (mirror_x)
           ch_cos = -ch_cos;
-        feat.push_back(ch_px - bpx);
+        feat.push_back(ch_px - bpx);                      // Δpos (3)
         feat.push_back(ch.pos_y - bpy);
         feat.push_back(ch.pos_z);
-        AppendStrikerStateOH(feat, ch.action_state);
-        feat.push_back(sh);
+        feat.push_back(StrikerStateIdx(ch.action_state));  // state index (1)
+        feat.push_back(sh);                                // heading (2)
         feat.push_back(ch_cos);
-        feat.push_back(s == owner_slot ? 1.0f : 0.0f);
+        feat.push_back(s == owner_slot ? 1.0f : 0.0f);    // is carrier (1)
       }
       else
       {
-        for (int z = 0; z < 36; z++)
+        for (int z = 0; z < 7; z++)
           feat.push_back(0.0f);
       }
     }
   }
 
-  // --- 5. Friendly goalie (30) ---
+  // --- 5. Friendly goalie (4) ---
   {
     const CharData& gs = chars[own_goalie_slot];
-    feat.push_back(mx(gs.pos_x) - bpx);
+    feat.push_back(mx(gs.pos_x) - bpx);                   // Δpos (3)
     feat.push_back(gs.pos_y - bpy);
     feat.push_back(gs.pos_z);
-    AppendGoalieStateOH(feat, gs.action_state);
+    feat.push_back(GoalieStateIdx(gs.action_state));       // state index (1)
   }
 
-  // --- 6. 4 enemy strikers sorted by distance to ball (4 × 36 = 144) ---
+  // --- 6. 4 enemy strikers sorted by distance to ball (4 × 7 = 28) ---
   {
     struct SlotDist { int slot; float dist2; };
     SlotDist enemies[4];
@@ -678,23 +758,23 @@ std::vector<float> AIController::ReadGameState(int controlled_port, bool mirror_
       auto [sh, ch_cos] = HeadingSinCos(ch.heading);
       if (mirror_x)
         ch_cos = -ch_cos;
-      feat.push_back(ch_px - bpx);
+      feat.push_back(ch_px - bpx);                        // Δpos (3)
       feat.push_back(ch.pos_y - bpy);
       feat.push_back(ch.pos_z);
-      AppendStrikerStateOH(feat, ch.action_state);
-      feat.push_back(sh);
+      feat.push_back(StrikerStateIdx(ch.action_state));    // state index (1)
+      feat.push_back(sh);                                  // heading (2)
       feat.push_back(ch_cos);
-      feat.push_back(s == owner_slot ? 1.0f : 0.0f);
+      feat.push_back(s == owner_slot ? 1.0f : 0.0f);      // is carrier (1)
     }
   }
 
-  // --- 7. Enemy goalie (30) ---
+  // --- 7. Enemy goalie (4) ---
   {
     const CharData& eg = chars[enemy_goalie_slot];
-    feat.push_back(mx(eg.pos_x) - bpx);
+    feat.push_back(mx(eg.pos_x) - bpx);                   // Δpos (3)
     feat.push_back(eg.pos_y - bpy);
     feat.push_back(eg.pos_z);
-    AppendGoalieStateOH(feat, eg.action_state);
+    feat.push_back(GoalieStateIdx(eg.action_state));       // state index (1)
   }
 
   // --- 8. Own inventory (2 × 11 = 22) ---
@@ -729,12 +809,53 @@ std::vector<float> AIController::ReadGameState(int controlled_port, bool mirror_
       feat.push_back(0.0f);
   }
 
-  // --- 10. Tactical summary (5) ---
+  // --- 10. 4 nearest field items (8 × 4 = 32) ---
   {
-    float sc_px_ts  = mx(chars[self_slot].pos_x);
-    float sc_py_ts  = chars[self_slot].pos_y;
-    float sdx       = sc_px_ts - bpx;
-    float sdy       = sc_py_ts - bpy;
+    std::vector<FieldItem> all_items = ReadFieldItems(acc);
+
+    struct ItemDist { float dist2; int idx; };
+    std::vector<ItemDist> sorted_items;
+    sorted_items.reserve(all_items.size());
+    for (int i = 0; i < static_cast<int>(all_items.size()); i++)
+    {
+      float ipx = mx(all_items[i].pos_x);
+      float ipy = all_items[i].pos_y;
+      float dx2 = ipx - sc_px;
+      float dy2 = ipy - sc_py;
+      sorted_items.push_back({dx2 * dx2 + dy2 * dy2, i});
+    }
+    std::sort(sorted_items.begin(), sorted_items.end(),
+              [](const ItemDist& a, const ItemDist& b) { return a.dist2 < b.dist2; });
+
+    for (int k = 0; k < FIELD_ITEM_K; k++)
+    {
+      if (k < static_cast<int>(sorted_items.size()))
+      {
+        const FieldItem& fi = all_items[sorted_items[k].idx];
+        float ipx = mx(fi.pos_x);
+        float ipy = fi.pos_y;
+        feat.push_back(static_cast<float>(std::min(fi.powerup_type, 8)));  // type idx (1)
+        feat.push_back(ipx - sc_px);            // Δpos to self (3)
+        feat.push_back(ipy - sc_py);
+        feat.push_back(fi.pos_z);               // pos_z is height, not mirrored
+        feat.push_back(mx(fi.vel_x));           // velocity (3)
+        feat.push_back(fi.vel_y);
+        feat.push_back(fi.vel_z);
+        feat.push_back(fi.strength_level / 2.0f);  // strength (1)
+      }
+      else
+      {
+        feat.push_back(9.0f);  // padding type index (empty slot)
+        for (int z = 0; z < 7; z++)
+          feat.push_back(0.0f);
+      }
+    }
+  }
+
+  // --- 11. Tactical summary (5) ---
+  {
+    float sdx       = sc_px - bpx;
+    float sdy       = sc_py - bpy;
     float self_dist = std::sqrt(sdx * sdx + sdy * sdy);
 
     int self_rank = 0;
@@ -752,13 +873,14 @@ std::vector<float> AIController::ReadGameState(int controlled_port, bool mirror_
     feat.push_back(static_cast<float>(self_rank) / 3.0f);
     feat.push_back(self_rank == 0 ? 1.0f : 0.0f);
 
+    // Nearest enemy to self
     float min_en_dist2 = 1e18f;
     int   nearest_en   = enemy_striker_slots[0];
     for (int i = 0; i < 4; i++)
     {
       int   s  = enemy_striker_slots[i];
-      float ex = mx(chars[s].pos_x) - sc_px_ts;
-      float ey = chars[s].pos_y - sc_py_ts;
+      float ex = mx(chars[s].pos_x) - sc_px;
+      float ey = chars[s].pos_y - sc_py;
       float d2 = ex * ex + ey * ey;
       if (d2 < min_en_dist2)
       {
@@ -769,43 +891,42 @@ std::vector<float> AIController::ReadGameState(int controlled_port, bool mirror_
     float nearest_enemy_dist = std::sqrt(min_en_dist2);
     feat.push_back(nearest_enemy_dist / 40.0f);
 
-    float goal_dx  = goal_x - sc_px_ts;
-    float goal_dy  = 0.0f - sc_py_ts;
+    float goal_dx  = goal_x - sc_px;
+    float goal_dy  = 0.0f - sc_py;
     float goal_len = std::sqrt(goal_dx * goal_dx + goal_dy * goal_dy) + 1e-6f;
-    float en_dx    = mx(chars[nearest_en].pos_x) - sc_px_ts;
-    float en_dy    = chars[nearest_en].pos_y - sc_py_ts;
+    float en_dx    = mx(chars[nearest_en].pos_x) - sc_px;
+    float en_dy    = chars[nearest_en].pos_y - sc_py;
     float en_len   = nearest_enemy_dist + 1e-6f;
     feat.push_back((goal_dx / goal_len) * (en_dx / en_len) +
                    (goal_dy / goal_len) * (en_dy / en_len));
   }
 
-  // --- 11. Score diff + time fraction (2) ---
-  float score_clamped = std::max(-5.0f, std::min(5.0f, static_cast<float>(score_diff)));
-  feat.push_back(score_clamped / 5.0f);
-  feat.push_back(std::min(game_time / match_time_allotted, 1.0f));
-
   // --- 12. Possession booleans (2) ---
-  // friendly_has_ball: owner_slot belongs to our team (any striker or goalie slot)
-  bool friendly_has_ball = false;
-  if (owner_slot != 10)
   {
-    for (int i = 0; i < 4; i++)
+    bool friendly_has_ball = false;
+    if (owner_slot != 10)
     {
-      if (own_striker_slots[i] == owner_slot)
+      for (int i = 0; i < 4; i++)
       {
-        friendly_has_ball = true;
-        break;
+        if (own_striker_slots[i] == owner_slot)
+        {
+          friendly_has_ball = true;
+          break;
+        }
       }
+      if (own_goalie_slot == owner_slot)
+        friendly_has_ball = true;
     }
-    if (own_goalie_slot == owner_slot)
-      friendly_has_ball = true;
+    bool enemy_has_ball = (owner_slot != 10 && !friendly_has_ball);
+    feat.push_back(friendly_has_ball ? 1.0f : 0.0f);
+    feat.push_back(enemy_has_ball    ? 1.0f : 0.0f);
   }
-  bool enemy_has_ball = (owner_slot != 10 && !friendly_has_ball);
-  feat.push_back(friendly_has_ball ? 1.0f : 0.0f);
-  feat.push_back(enemy_has_ball    ? 1.0f : 0.0f);
 
-  // --- 13. Previous frame action (10) ---
-  // Zeroed at segment boundaries (handled in OnFrameEnd before calling ReadGameState).
+  // --- 13. Phase booleans (2) ---
+  feat.push_back(game_phase == 1 ? 1.0f : 0.0f);          // is_kickoff
+  feat.push_back(owner_slot == own_goalie_slot ? 1.0f : 0.0f);  // goalie_has_ball
+
+  // --- 14. Previous frame action (11) ---
   for (int i = 0; i < PREV_ACTION_DIM; i++)
     feat.push_back(m_prev_labels[i]);
 
@@ -820,27 +941,62 @@ std::vector<float> AIController::ReadGameState(int controlled_port, bool mirror_
 }
 
 // ---------------------------------------------------------------------------
-// DecodeOutput
+// DecodeOutput (v7: action vocabulary — btn_probs are 0/1 flags from categorical)
 // ---------------------------------------------------------------------------
+// Button indices: 0=A, 1=B, 2=X, 3=Y, 4=lob_pass, 5=chip_shot, 6=R
+// lob_pass  fires → set L+A on pad
+// chip_shot fires → set L+B on pad
 
 GCPadStatus AIController::DecodeOutput(const float* btn_probs, const float* stick_vals,
-                                        bool mirror_x) const
+                                        bool mirror_x)
 {
   GCPadStatus pad{};
   pad.isConnected = true;
   pad.button      = PAD_USE_ORIGIN;
 
-  if (btn_probs[0] > 0.5f) pad.button |= PAD_BUTTON_A;
-  if (btn_probs[1] > 0.5f) pad.button |= PAD_BUTTON_B;
-  if (btn_probs[2] > 0.5f) pad.button |= PAD_BUTTON_X;
-  if (btn_probs[3] > 0.5f) pad.button |= PAD_BUTTON_Y;
-  if (btn_probs[4] > 0.5f) pad.button |= PAD_TRIGGER_L;
-  if (btn_probs[5] > 0.5f) pad.button |= PAD_TRIGGER_R;
+  // Action vocabulary: btn_probs are now 0/1 flags from categorical sampling.
+  // Simple threshold to convert float to bool.
+  bool btn_state[BUTTON_DIM_OUT];
+  for (int i = 0; i < BUTTON_DIM_OUT; i++)
+    btn_state[i] = btn_probs[i] > 0.5f;
 
-  if (btn_probs[0] > 0.5f) pad.analogA = 0xFF;
-  if (btn_probs[1] > 0.5f) pad.analogB = 0xFF;
-  if (btn_probs[4] > 0.5f) pad.triggerLeft  = 0xFF;
-  if (btn_probs[5] > 0.5f) pad.triggerRight = 0xFF;
+  bool has_a         = btn_state[0];
+  bool has_b         = btn_state[1];
+  bool has_x         = btn_state[2];
+  bool has_y         = btn_state[3];
+  bool has_lob_pass  = btn_state[4];
+  bool has_chip_shot = btn_state[5];
+  bool has_r         = btn_state[6];
+
+  // A: direct pass / switch. lob_pass also implies A.
+  if (has_a || has_lob_pass)
+  {
+    pad.button |= PAD_BUTTON_A;
+    pad.analogA = 0xFF;
+  }
+
+  // B: direct shot / slide. chip_shot also implies B.
+  if (has_b || has_chip_shot)
+  {
+    pad.button |= PAD_BUTTON_B;
+    pad.analogB = 0xFF;
+  }
+
+  if (has_x)  pad.button |= PAD_BUTTON_X;
+  if (has_y)  pad.button |= PAD_BUTTON_Y;
+
+  // L: only set via composite lob_pass or chip_shot (never standalone)
+  if (has_lob_pass || has_chip_shot)
+  {
+    pad.button |= PAD_TRIGGER_L;
+    pad.triggerLeft = 0xFF;
+  }
+
+  if (has_r)
+  {
+    pad.button |= PAD_TRIGGER_R;
+    pad.triggerRight = 0xFF;
+  }
 
   // stick_vals are in [-1, 1] canonical (attacks-right) space.
   // Mirror stick_x/cstick_x back to native GC orientation if needed.
@@ -853,6 +1009,14 @@ GCPadStatus AIController::DecodeOutput(const float* btn_probs, const float* stic
   float stick_y  = stick_vals[1];
   float cstick_x = stick_vals[2];
   float cstick_y = stick_vals[3];
+
+  // C-stick deadzone: soft expected value pulls c-stick off-neutral even when the
+  // model's peak is at bin 10 (neutral).  C-stick is neutral 81-90% of the time in
+  // training data, so snap small values to zero.  Threshold of 0.4 (~bin 6/14)
+  // ensures only intentional dekes register.
+  constexpr float kCStickDeadzone = 0.4f;
+  if (std::abs(cstick_x) < kCStickDeadzone) cstick_x = 0.0f;
+  if (std::abs(cstick_y) < kCStickDeadzone) cstick_y = 0.0f;
 
   if (mirror_x)
   {

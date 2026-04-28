@@ -49,25 +49,29 @@ public:
   GCPadStatus GetLastOutput() const;
 
 private:
-  // ── Model dimensions (must stay in sync with train_transformer.py) ──────────
-  static constexpr int FEATURE_DIM     = 442;  // flat features per frame
-  static constexpr int PREV_ACTION_DIM = 10;   // trailing prev-frame labels in feature vec
+  // ── Model dimensions (must stay in sync with train_transformer.py v6) ───────
+  static constexpr int FEATURE_DIM     = 194;  // flat features per frame (v6)
+  static constexpr int BUTTON_DIM_OUT  = 7;    // A, B, X, Y, lob_pass, chip_shot, R
+  static constexpr int STICK_DIM_OUT   = 4;    // stick_x, stick_y, cstick_x, cstick_y
+  static constexpr int PREV_ACTION_DIM = BUTTON_DIM_OUT + STICK_DIM_OUT;  // 11
 
   // Transformer KV cache: [TEMPORAL_LAYERS, 2 (k/v), 1 (batch), SEQ_LEN-1, TEMPORAL_DIM]
   static constexpr int KV_CACHE_LAYERS = 3;
-  static constexpr int KV_CACHE_SEQ    = 63;   // SEQ_LEN - 1
+  static constexpr int KV_CACHE_SEQ    = 127;  // SEQ_LEN(128) - 1
   static constexpr int KV_CACHE_DIM    = 512;
-  // Flat size: 3 * 2 * 1 * 63 * 512 = 193,536
+  // Flat size: 3 * 2 * 1 * 127 * 512 = 389,112
   static constexpr int KV_CACHE_SIZE   = KV_CACHE_LAYERS * 2 * KV_CACHE_SEQ * KV_CACHE_DIM;
 
-  // Build the 442-float feature vector from live GC memory.
-  // Mirrors extract_features() + prev_labels in Tools/build_dataset.py exactly.
+  // Build the 194-float feature vector from live GC memory.
+  // Mirrors extract_features() + prev_labels in build_dataset.py v6 exactly.
   std::vector<float> ReadGameState(int controlled_port, bool mirror_x) const;
 
-  // Decode raw model outputs (btn_probs [6], stick_vals [4]) into a GCPadStatus.
+  // Decode raw model outputs (btn_probs [7], stick_vals [4]) into a GCPadStatus.
+  // btn_probs are 0/1 flags from the action vocabulary categorical output.
   // mirror_x: if true, negate stick_x/cstick_x before converting to byte.
+  // lob_pass (index 4) maps to L+A, chip_shot (index 5) maps to L+B.
   GCPadStatus DecodeOutput(const float* btn_probs, const float* stick_vals,
-                            bool mirror_x) const;
+                            bool mirror_x);
 
   std::unique_ptr<Ort::Env>     m_env;
   std::unique_ptr<Ort::Session> m_session;
