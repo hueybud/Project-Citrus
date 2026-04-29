@@ -10,9 +10,13 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <condition_variable>
 #include <cstring>
+#include <mutex>
 #include <numeric>
+#include <optional>
 #include <stdexcept>
+#include <thread>
 #include <utility>
 
 #include "Common/Logging/Log.h"
@@ -31,8 +35,76 @@
 #pragma warning(pop)
 #endif
 
+#ifdef _WIN32
+// For SetThreadPriority on the inference worker.
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#endif
+
 namespace Movie
 {
+
+// ---------------------------------------------------------------------------
+// Windowed timing stats — percentile dump of recent samples.
+// Used to characterize tail latency (p95/p99/max) which sample-every-N logs
+// miss but which directly causes FPS drops.  Single-thread access only.
+// ---------------------------------------------------------------------------
+namespace
+{
+struct WindowedStats
+{
+  static constexpr size_t WINDOW = 600;  // ~10s @ 60Hz
+  std::array<float, WINDOW> samples{};
+  size_t n            = 0;
+  int    spikes       = 0;
+  float  worst        = 0.0f;
+  float  threshold_ms = 10.0f;  // tunable per metric (e.g. 17ms for interval)
+
+  explicit WindowedStats(float threshold = 10.0f) : threshold_ms(threshold) {}
+
+  void Push(float v)
+  {
+    if (n < WINDOW)
+      samples[n] = v;
+    n++;
+    if (v > threshold_ms)
+      spikes++;
+    if (v > worst)
+      worst = v;
+  }
+
+  bool Full() const { return n >= WINDOW; }
+
+  void Dump(const char* label) const
+  {
+    if (n == 0)
+      return;
+    const size_t count = std::min(n, WINDOW);
+    std::array<float, WINDOW> sorted = samples;
+    std::sort(sorted.begin(), sorted.begin() + count);
+    const float sum  = std::accumulate(sorted.begin(), sorted.begin() + count, 0.0f);
+    const float mean = sum / static_cast<float>(count);
+    auto pct = [&](float p) {
+      const size_t idx = static_cast<size_t>(p * static_cast<float>(count - 1));
+      return sorted[idx];
+    };
+    INFO_LOG_FMT(CORE,
+                 "AI stats {}: n={} mean={:.2f} p50={:.2f} p95={:.2f} p99={:.2f} "
+                 "max={:.2f} spikes>{:.0f}ms={}",
+                 label, count, mean, pct(0.50f), pct(0.95f), pct(0.99f),
+                 worst, threshold_ms, spikes);
+  }
+
+  void Reset()
+  {
+    n      = 0;
+    spikes = 0;
+    worst  = 0.0f;
+  }
+};
+}  // namespace
 
 // Stochastic sampling RNG for button presses (Bernoulli policy).
 
@@ -235,13 +307,57 @@ static InventorySlot ReadInventorySlot(uint32_t team_ptr, int slot_index)
 }
 
 // ---------------------------------------------------------------------------
-// AIController implementation
+// LocalOnnxBackend — runs ONNX Runtime on a dedicated worker thread.
+// Owns: ORT session, KV cache, prev_labels, output slot.
+// All public methods are thread-safe per the AIInferenceBackend contract.
 // ---------------------------------------------------------------------------
 
-AIController::AIController() = default;
-AIController::~AIController() { Shutdown(); }
+namespace
+{
+class LocalOnnxBackend : public AIInferenceBackend
+{
+public:
+  LocalOnnxBackend() = default;
+  ~LocalOnnxBackend() override { Shutdown(); }
 
-bool AIController::Load(const std::string& onnx_path)
+  bool Load(const std::string& onnx_path);
+
+  // AIInferenceBackend
+  void        Submit(AIInputFrame frame) override;
+  GCPadStatus GetLastOutput() const override;
+  bool        HasOutput() const override;
+  void        Shutdown() override;
+
+private:
+  void        WorkerLoop();
+  GCPadStatus DecodeOutput(const float* btn_probs, const float* stick_vals,
+                           bool mirror_x);
+  std::vector<float> BuildFullFeatures(const std::vector<float>& core) const;
+
+  // ORT session — touched only by Load()/Shutdown() (emu thread, before/after
+  // worker is running) and by WorkerLoop() (worker thread, between).  The
+  // worker join in Shutdown() guarantees no concurrent access to the session.
+  std::unique_ptr<Ort::Env>     m_env;
+  std::unique_ptr<Ort::Session> m_session;
+
+  // Worker thread + input slot (single-slot, latest-wins).
+  std::thread                 m_worker;
+  mutable std::mutex          m_in_mu;
+  std::condition_variable     m_in_cv;
+  std::optional<AIInputFrame> m_pending;
+  bool                        m_stop = false;
+
+  // Output slot (mutex — GCPadStatus is 11 bytes, not atomic-friendly).
+  mutable std::mutex m_out_mu;
+  GCPadStatus        m_last_output{};
+  bool               m_has_output = false;
+
+  // Worker-owned context.  No synchronization; only the worker touches these.
+  std::array<float, AIModelDims::KV_CACHE_SIZE>   m_kv_cache{};
+  std::array<float, AIModelDims::PREV_ACTION_DIM> m_prev_labels{};
+};
+
+bool LocalOnnxBackend::Load(const std::string& onnx_path)
 {
   Shutdown();
 
@@ -250,7 +366,12 @@ bool AIController::Load(const std::string& onnx_path)
     m_env = std::make_unique<Ort::Env>(ORT_LOGGING_LEVEL_WARNING, "citrus_ai");
 
     Ort::SessionOptions opts;
-    opts.SetIntraOpNumThreads(1);
+    // intra-op = 2: lets ORT parallelize matmul across 2 threads internally.
+    // Python benchmark on this model shows intra=2 gives both lower mean
+    // (4.40 vs 4.66) and tighter p99 (6.51 vs 8.09) than intra=1.  Costs one
+    // extra core during the ~5ms inference window per frame — fine on any
+    // modern CPU.  inter-op left at default since the graph is sequential.
+    opts.SetIntraOpNumThreads(2);
     opts.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
 
 #ifdef _WIN32
@@ -269,7 +390,7 @@ bool AIController::Load(const std::string& onnx_path)
     if (num_inputs != 2 || num_outputs != 3)
     {
       ERROR_LOG_FMT(CORE,
-                    "AIController: unexpected I/O count: {} inputs {} outputs "
+                    "LocalOnnxBackend: unexpected I/O count: {} inputs {} outputs "
                     "(expected 2 inputs: features/kv_cache_in, "
                     "3 outputs: btn_probs/stick_vals/kv_cache_out)",
                     num_inputs, num_outputs);
@@ -277,126 +398,158 @@ bool AIController::Load(const std::string& onnx_path)
       return false;
     }
 
-    // Check features shape [1, FEATURE_DIM]
     auto feat_info  = m_session->GetInputTypeInfo(0);
     auto feat_shape = feat_info.GetTensorTypeAndShapeInfo().GetShape();
-    if (feat_shape.size() != 2 || feat_shape[1] != FEATURE_DIM)
+    if (feat_shape.size() != 2 || feat_shape[1] != AIModelDims::FEATURE_DIM)
     {
-      ERROR_LOG_FMT(CORE, "AIController: unexpected features shape (expected [1,{}])",
-                    FEATURE_DIM);
+      ERROR_LOG_FMT(CORE, "LocalOnnxBackend: unexpected features shape (expected [1,{}])",
+                    AIModelDims::FEATURE_DIM);
       Shutdown();
       return false;
     }
 
-    // Check kv_cache_in shape [KV_CACHE_LAYERS, 2, 1, KV_CACHE_SEQ, KV_CACHE_DIM]
     auto kv_info  = m_session->GetInputTypeInfo(1);
     auto kv_shape = kv_info.GetTensorTypeAndShapeInfo().GetShape();
     if (kv_shape.size() != 5 ||
-        kv_shape[0] != KV_CACHE_LAYERS || kv_shape[1] != 2 ||
-        kv_shape[3] != KV_CACHE_SEQ    || kv_shape[4] != KV_CACHE_DIM)
+        kv_shape[0] != AIModelDims::KV_CACHE_LAYERS || kv_shape[1] != 2 ||
+        kv_shape[3] != AIModelDims::KV_CACHE_SEQ    || kv_shape[4] != AIModelDims::KV_CACHE_DIM)
     {
       ERROR_LOG_FMT(CORE,
-                    "AIController: unexpected kv_cache_in shape "
-                    "(expected [{},2,1,{},{}])",
-                    KV_CACHE_LAYERS, KV_CACHE_SEQ, KV_CACHE_DIM);
+                    "LocalOnnxBackend: unexpected kv_cache_in shape (expected [{},2,1,{},{}])",
+                    AIModelDims::KV_CACHE_LAYERS, AIModelDims::KV_CACHE_SEQ,
+                    AIModelDims::KV_CACHE_DIM);
       Shutdown();
       return false;
     }
 
-    m_loaded = true;
-    INFO_LOG_FMT(CORE, "AIController: loaded v6 transformer model from {}", onnx_path);
+    INFO_LOG_FMT(CORE, "LocalOnnxBackend: loaded v6 transformer model from {}", onnx_path);
+
+    // Spin up the worker now that the session is valid.
+    m_stop   = false;
+    m_worker = std::thread(&LocalOnnxBackend::WorkerLoop, this);
     return true;
   }
   catch (const Ort::Exception& e)
   {
-    ERROR_LOG_FMT(CORE, "AIController: ORT exception loading model: {}", e.what());
+    ERROR_LOG_FMT(CORE, "LocalOnnxBackend: ORT exception loading model: {}", e.what());
     Shutdown();
     return false;
   }
   catch (const std::exception& e)
   {
-    ERROR_LOG_FMT(CORE, "AIController: exception loading model: {}", e.what());
+    ERROR_LOG_FMT(CORE, "LocalOnnxBackend: exception loading model: {}", e.what());
     Shutdown();
     return false;
   }
 }
 
-void AIController::Shutdown()
+void LocalOnnxBackend::Submit(AIInputFrame frame)
 {
-  m_session.reset();
-  m_env.reset();
-  m_loaded            = false;
-  m_match_active      = false;
-  m_prev_phase_family = -1;
-  m_kv_cache.fill(0.0f);
-  m_prev_labels.fill(0.0f);
-  std::memset(&m_last_output, 0, sizeof(m_last_output));
-  m_last_output.stickX      = 128;
-  m_last_output.stickY      = 128;
-  m_last_output.substickX   = 128;
-  m_last_output.substickY   = 128;
-  m_last_output.isConnected = true;
+  {
+    std::lock_guard<std::mutex> lk(m_in_mu);
+    m_pending = std::move(frame);  // overwrites any unread previous frame
+  }
+  m_in_cv.notify_one();
 }
 
-bool AIController::IsLoaded() const { return m_loaded; }
-bool AIController::IsMatchActive() const { return m_match_active; }
-GCPadStatus AIController::GetLastOutput() const { return m_last_output; }
-
-void AIController::OnFrameEnd(int controlled_port, bool mirror_x)
+GCPadStatus LocalOnnxBackend::GetLastOutput() const
 {
-  if (!m_loaded || !m_session)
-    return;
+  std::lock_guard<std::mutex> lk(m_out_mu);
+  return m_last_output;
+}
 
-  // Read game phase to detect segment boundaries (mirrors build_dataset.py segmentation).
-  constexpr uint32_t CGAME_SINGLETON = 0x80373708;
-  uint32_t cGamePtr   = Memory::Read_U32(CGAME_SINGLETON);
-  uint32_t game_phase = (cGamePtr != 0) ? Memory::Read_U32(cGamePtr + 0x24) : 0;
+bool LocalOnnxBackend::HasOutput() const
+{
+  std::lock_guard<std::mutex> lk(m_out_mu);
+  return m_has_output;
+}
 
-  // phase_family: 1=kickoff, 4=active play (phases 4 and 5), -1=everything else
-  int phase_family = -1;
-  if (game_phase == 1)
-    phase_family = 1;
-  else if (game_phase == 4 || game_phase == 5)
-    phase_family = 4;
-
-  // On phase-family transition reset KV cache and prev_labels so the model
-  // starts each segment with clean context — matching training boundaries.
-  bool phase_changed  = (phase_family != m_prev_phase_family);
-  m_prev_phase_family = phase_family;
-
-  if (phase_family == -1)
+void LocalOnnxBackend::Shutdown()
+{
   {
-    // Outside active play (celebrations, menus, etc.) — clear context.
-    m_match_active = false;
-    if (phase_changed)
+    std::lock_guard<std::mutex> lk(m_in_mu);
+    m_stop = true;
+    m_pending.reset();
+  }
+  m_in_cv.notify_all();
+  if (m_worker.joinable())
+    m_worker.join();
+
+  // Worker is now gone; safe to release the session.
+  m_session.reset();
+  m_env.reset();
+
+  // Reset output to a neutral pad so any late GetLastOutput() reads after
+  // a model unload return safe values.
+  std::lock_guard<std::mutex> lk(m_out_mu);
+  m_has_output = false;
+  std::memset(&m_last_output, 0, sizeof(m_last_output));
+  m_last_output.stickX      = 0x80;
+  m_last_output.stickY      = 0x80;
+  m_last_output.substickX   = 0x80;
+  m_last_output.substickY   = 0x80;
+  m_last_output.isConnected = true;
+
+  // Worker-owned state — worker is gone, safe to clear.
+  m_kv_cache.fill(0.0f);
+  m_prev_labels.fill(0.0f);
+}
+
+std::vector<float> LocalOnnxBackend::BuildFullFeatures(const std::vector<float>& core) const
+{
+  std::vector<float> full;
+  full.reserve(AIModelDims::FEATURE_DIM);
+  full.insert(full.end(), core.begin(), core.end());
+  full.insert(full.end(), m_prev_labels.begin(), m_prev_labels.end());
+  return full;
+}
+
+void LocalOnnxBackend::WorkerLoop()
+{
+#ifdef _WIN32
+  // Without this bump the worker runs at NORMAL priority and is constantly
+  // preempted by Dolphin's emu thread mid-Run(), doubling per-inference wall
+  // time (5.5ms → 11ms measured).  ABOVE_NORMAL is enough to outrank emu.
+  ::SetThreadPriority(::GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);
+#endif
+
+  // Worker-thread windowed timing buckets (independent from emu-thread stats).
+  WindowedStats stats_infer(10.0f);   // >10ms = potential FPS pressure (legacy)
+  int           feat_log_counter  = 0;
+  int           infer_log_counter = 0;
+
+  while (true)
+  {
+    AIInputFrame frame;
+    {
+      std::unique_lock<std::mutex> lk(m_in_mu);
+      m_in_cv.wait(lk, [this] { return m_stop || m_pending.has_value(); });
+      if (m_stop && !m_pending.has_value())
+        return;
+      frame = std::move(*m_pending);
+      m_pending.reset();
+    }
+
+    // Honor reset flag from emu thread before assembling features.
+    if (frame.reset_context)
     {
       m_kv_cache.fill(0.0f);
       m_prev_labels.fill(0.0f);
     }
-    return;
-  }
 
-  if (phase_changed)
-  {
-    m_kv_cache.fill(0.0f);
-    m_prev_labels.fill(0.0f);
-  }
-
-  auto t_frame_start = std::chrono::steady_clock::now();
-  std::vector<float> features = ReadGameState(controlled_port, mirror_x);
-  auto t_gs_end = std::chrono::steady_clock::now();
-  if (features.empty())
-  {
-    m_match_active = false;
-    return;
-  }
-
-  // Log a sample of raw feature values every 120 frames
-  {
-    static int s_feat_counter = 0;
-    if (++s_feat_counter % 120 == 1)
+    if (static_cast<int>(frame.core_features.size()) != AIModelDims::CORE_FEATURE_DIM)
     {
-      const int N = FEATURE_DIM;
+      WARN_LOG_FMT(CORE, "LocalOnnxBackend: dropping frame with bad core size {}",
+                   frame.core_features.size());
+      continue;
+    }
+
+    std::vector<float> features = BuildFullFeatures(frame.core_features);
+
+    // Sample a feature row every ~2s for behavioral debugging.
+    if (++feat_log_counter % 120 == 1)
+    {
+      const int N = AIModelDims::FEATURE_DIM;
       INFO_LOG_FMT(CORE,
                    "AIController feat[0..10]: {:.3f} {:.3f} {:.3f} {:.3f} {:.3f} "
                    "{:.3f} {:.3f} {:.3f} {:.3f} {:.3f} {:.3f}",
@@ -411,107 +564,309 @@ void AIController::OnFrameEnd(int controlled_port, bool mirror_x)
                    features[N-7], features[N-6], features[N-5],
                    features[N-4], features[N-3], features[N-2], features[N-1]);
     }
-  }
 
-  try
-  {
-    Ort::MemoryInfo mem_info =
-        Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
-
-    // Input 0: features [1, FEATURE_DIM]
-    int64_t feat_shape[] = {1, FEATURE_DIM};
-    Ort::Value feat_tensor = Ort::Value::CreateTensor<float>(
-        mem_info, features.data(), FEATURE_DIM, feat_shape, 2);
-
-    // Input 1: kv_cache_in [KV_CACHE_LAYERS, 2, 1, KV_CACHE_SEQ, KV_CACHE_DIM]
-    int64_t kv_shape[] = {KV_CACHE_LAYERS, 2, 1, KV_CACHE_SEQ, KV_CACHE_DIM};
-    Ort::Value kv_tensor = Ort::Value::CreateTensor<float>(
-        mem_info, m_kv_cache.data(), KV_CACHE_SIZE, kv_shape, 5);
-
-    std::array<Ort::Value, 2> inputs = {std::move(feat_tensor), std::move(kv_tensor)};
-
-    const char* input_names[]  = {"features", "kv_cache_in"};
-    const char* output_names[] = {"btn_probs", "stick_vals", "kv_cache_out"};
-
-    auto t0 = std::chrono::steady_clock::now();
-    auto outputs = m_session->Run(Ort::RunOptions{nullptr},
-                                  input_names, inputs.data(), 2,
-                                  output_names, 3);
-    auto t1 = std::chrono::steady_clock::now();
-    static int s_infer_counter = 0;
-    if (++s_infer_counter % 120 == 1)
+    try
     {
-      float ms_gs    = std::chrono::duration<float, std::milli>(t_gs_end - t_frame_start).count();
+      Ort::MemoryInfo mem_info =
+          Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
+
+      int64_t feat_shape[] = {1, AIModelDims::FEATURE_DIM};
+      Ort::Value feat_tensor = Ort::Value::CreateTensor<float>(
+          mem_info, features.data(), AIModelDims::FEATURE_DIM, feat_shape, 2);
+
+      int64_t kv_shape[] = {AIModelDims::KV_CACHE_LAYERS, 2, 1,
+                            AIModelDims::KV_CACHE_SEQ, AIModelDims::KV_CACHE_DIM};
+      Ort::Value kv_tensor = Ort::Value::CreateTensor<float>(
+          mem_info, m_kv_cache.data(), AIModelDims::KV_CACHE_SIZE, kv_shape, 5);
+
+      std::array<Ort::Value, 2> inputs = {std::move(feat_tensor), std::move(kv_tensor)};
+
+      const char* input_names[]  = {"features", "kv_cache_in"};
+      const char* output_names[] = {"btn_probs", "stick_vals", "kv_cache_out"};
+
+      auto t0 = std::chrono::steady_clock::now();
+      auto outputs = m_session->Run(Ort::RunOptions{nullptr},
+                                    input_names, inputs.data(), 2,
+                                    output_names, 3);
+      auto t1 = std::chrono::steady_clock::now();
+
       float ms_infer = std::chrono::duration<float, std::milli>(t1 - t0).count();
-      float ms_total = std::chrono::duration<float, std::milli>(t1 - t_frame_start).count();
-      INFO_LOG_FMT(CORE, "AIController timing: gs={:.2f}ms  infer={:.2f}ms  total={:.2f}ms",
-                   ms_gs, ms_infer, ms_total);
-    }
+      stats_infer.Push(ms_infer);
+      if (stats_infer.Full())
+      {
+        stats_infer.Dump("infer_ms   ");
+        stats_infer.Reset();
+      }
 
-    const float* btn_probs  = outputs[0].GetTensorData<float>();
-    const float* stick_vals = outputs[1].GetTensorData<float>();
+      const float* btn_probs  = outputs[0].GetTensorData<float>();
+      const float* stick_vals = outputs[1].GetTensorData<float>();
 
-    // Log raw model outputs every 120 frames (v6: 7 buttons)
-    if (s_infer_counter % 120 == 1)
-    {
-      INFO_LOG_FMT(CORE,
-                   "AIController raw: btn=[{:.2f},{:.2f},{:.2f},{:.2f},{:.2f},{:.2f},{:.2f}] "
-                   "stk=[{:.3f},{:.3f},{:.3f},{:.3f}]",
-                   btn_probs[0], btn_probs[1], btn_probs[2], btn_probs[3],
-                   btn_probs[4], btn_probs[5], btn_probs[6],
-                   stick_vals[0], stick_vals[1], stick_vals[2], stick_vals[3]);
-    }
+      if (++infer_log_counter % 120 == 1)
+      {
+        INFO_LOG_FMT(CORE,
+                     "AIController raw: btn=[{:.2f},{:.2f},{:.2f},{:.2f},{:.2f},{:.2f},{:.2f}] "
+                     "stk=[{:.3f},{:.3f},{:.3f},{:.3f}]",
+                     btn_probs[0], btn_probs[1], btn_probs[2], btn_probs[3],
+                     btn_probs[4], btn_probs[5], btn_probs[6],
+                     stick_vals[0], stick_vals[1], stick_vals[2], stick_vals[3]);
+      }
 
-    m_last_output  = DecodeOutput(btn_probs, stick_vals, mirror_x);
-    m_match_active = true;
+      GCPadStatus pad = DecodeOutput(btn_probs, stick_vals, frame.mirror_x);
 
-    // Per-frame log: actual pad status delivered to the game.
-    {
-      const auto& p = m_last_output;
+      // Per-frame log of the pad delivered to the game.
       INFO_LOG_FMT(CORE,
                    "AI pad: {}{}{}{}{}{}{}  stk=({},{}) cstic=({},{})  raw=[{:.2f},{:.2f},{:.2f},"
                    "{:.2f},{:.2f},{:.2f},{:.2f}]",
-                   (p.button & PAD_BUTTON_A)   ? "A" : ".",
-                   (p.button & PAD_BUTTON_B)   ? "B" : ".",
-                   (p.button & PAD_BUTTON_X)   ? "X" : ".",
-                   (p.button & PAD_BUTTON_Y)   ? "Y" : ".",
-                   (p.button & PAD_TRIGGER_L)  ? "L" : ".",
-                   (p.button & PAD_TRIGGER_R)  ? "R" : ".",
-                   (p.button & PAD_BUTTON_START) ? "S" : ".",
-                   p.stickX, p.stickY, p.substickX, p.substickY,
+                   (pad.button & PAD_BUTTON_A)     ? "A" : ".",
+                   (pad.button & PAD_BUTTON_B)     ? "B" : ".",
+                   (pad.button & PAD_BUTTON_X)     ? "X" : ".",
+                   (pad.button & PAD_BUTTON_Y)     ? "Y" : ".",
+                   (pad.button & PAD_TRIGGER_L)    ? "L" : ".",
+                   (pad.button & PAD_TRIGGER_R)    ? "R" : ".",
+                   (pad.button & PAD_BUTTON_START) ? "S" : ".",
+                   pad.stickX, pad.stickY, pad.substickX, pad.substickY,
                    btn_probs[0], btn_probs[1], btn_probs[2], btn_probs[3],
                    btn_probs[4], btn_probs[5], btn_probs[6]);
+
+      // Carry KV cache forward.
+      const float* kv_out = outputs[2].GetTensorData<float>();
+      std::copy(kv_out, kv_out + AIModelDims::KV_CACHE_SIZE, m_kv_cache.begin());
+
+      // Update prev_labels from the actual pad we just sent.  Mirrors the
+      // pre-worker logic exactly so the next frame's input matches training.
+      m_prev_labels[0] = (pad.button & PAD_BUTTON_A)  ? 1.0f : 0.0f;
+      m_prev_labels[1] = (pad.button & PAD_BUTTON_B)  ? 1.0f : 0.0f;
+      m_prev_labels[2] = (pad.button & PAD_BUTTON_X)  ? 1.0f : 0.0f;
+      m_prev_labels[3] = (pad.button & PAD_BUTTON_Y)  ? 1.0f : 0.0f;
+      m_prev_labels[4] = (pad.button & PAD_TRIGGER_L) && (pad.button & PAD_BUTTON_A) ? 1.0f : 0.0f;
+      m_prev_labels[5] = (pad.button & PAD_TRIGGER_L) && (pad.button & PAD_BUTTON_B) ? 1.0f : 0.0f;
+      m_prev_labels[6] = (pad.button & PAD_TRIGGER_R) ? 1.0f : 0.0f;
+      for (int i = 0; i < AIModelDims::STICK_DIM_OUT; i++)
+        m_prev_labels[AIModelDims::BUTTON_DIM_OUT + i] = stick_vals[i];
+
+      // Publish to output slot.
+      {
+        std::lock_guard<std::mutex> lk(m_out_mu);
+        m_last_output = pad;
+        m_has_output  = true;
+      }
     }
-
-    // Carry KV cache forward to next frame
-    const float* kv_out = outputs[2].GetTensorData<float>();
-    std::copy(kv_out, kv_out + KV_CACHE_SIZE, m_kv_cache.begin());
-
-    // v6: populate prev_labels from the actual pad status sent to the game.
-    // This matches the sampled button decisions from DecodeOutput, avoiding a
-    // second independent random draw that would disagree with what was pressed.
-    const auto& p = m_last_output;
-    m_prev_labels[0] = (p.button & PAD_BUTTON_A)  ? 1.0f : 0.0f;
-    m_prev_labels[1] = (p.button & PAD_BUTTON_B)  ? 1.0f : 0.0f;
-    m_prev_labels[2] = (p.button & PAD_BUTTON_X)  ? 1.0f : 0.0f;
-    m_prev_labels[3] = (p.button & PAD_BUTTON_Y)  ? 1.0f : 0.0f;
-    m_prev_labels[4] = (p.button & PAD_TRIGGER_L) && (p.button & PAD_BUTTON_A) ? 1.0f : 0.0f;
-    m_prev_labels[5] = (p.button & PAD_TRIGGER_L) && (p.button & PAD_BUTTON_B) ? 1.0f : 0.0f;
-    m_prev_labels[6] = (p.button & PAD_TRIGGER_R) ? 1.0f : 0.0f;
-    for (int i = 0; i < STICK_DIM_OUT; i++)
-      m_prev_labels[BUTTON_DIM_OUT + i] = stick_vals[i];
+    catch (const Ort::Exception& e)
+    {
+      WARN_LOG_FMT(CORE, "LocalOnnxBackend: ORT inference error: {}", e.what());
+      std::lock_guard<std::mutex> lk(m_out_mu);
+      m_has_output = false;
+    }
   }
-  catch (const Ort::Exception& e)
+}
+
+GCPadStatus LocalOnnxBackend::DecodeOutput(const float* btn_probs, const float* stick_vals,
+                                            bool mirror_x)
+{
+  GCPadStatus pad{};
+  pad.isConnected = true;
+  pad.button      = PAD_USE_ORIGIN;
+
+  bool btn_state[AIModelDims::BUTTON_DIM_OUT];
+  for (int i = 0; i < AIModelDims::BUTTON_DIM_OUT; i++)
+    btn_state[i] = btn_probs[i] > 0.5f;
+
+  bool has_a         = btn_state[0];
+  bool has_b         = btn_state[1];
+  bool has_x         = btn_state[2];
+  bool has_y         = btn_state[3];
+  bool has_lob_pass  = btn_state[4];
+  bool has_chip_shot = btn_state[5];
+  bool has_r         = btn_state[6];
+
+  if (has_a || has_lob_pass)
   {
-    WARN_LOG_FMT(CORE, "AIController: ORT inference error: {}", e.what());
-    m_match_active = false;
+    pad.button |= PAD_BUTTON_A;
+    pad.analogA = 0xFF;
+  }
+  if (has_b || has_chip_shot)
+  {
+    pad.button |= PAD_BUTTON_B;
+    pad.analogB = 0xFF;
+  }
+  if (has_x)  pad.button |= PAD_BUTTON_X;
+  if (has_y)  pad.button |= PAD_BUTTON_Y;
+  if (has_lob_pass || has_chip_shot)
+  {
+    pad.button |= PAD_TRIGGER_L;
+    pad.triggerLeft = 0xFF;
+  }
+  if (has_r)
+  {
+    pad.button |= PAD_TRIGGER_R;
+    pad.triggerRight = 0xFF;
+  }
+
+  auto DecodeStick = [](float val) -> uint8_t {
+    float raw = val * 128.0f + 128.0f;
+    return static_cast<uint8_t>(std::max(0.0f, std::min(255.0f, raw)));
+  };
+
+  float stick_x  = stick_vals[0];
+  float stick_y  = stick_vals[1];
+  float cstick_x = stick_vals[2];
+  float cstick_y = stick_vals[3];
+
+  // C-stick deadzone: snap small values to neutral so only intentional dekes register.
+  constexpr float kCStickDeadzone = 0.4f;
+  if (std::abs(cstick_x) < kCStickDeadzone) cstick_x = 0.0f;
+  if (std::abs(cstick_y) < kCStickDeadzone) cstick_y = 0.0f;
+
+  if (mirror_x)
+  {
+    stick_x  = -stick_x;
+    cstick_x = -cstick_x;
+  }
+
+  pad.stickX    = DecodeStick(stick_x);
+  pad.stickY    = DecodeStick(stick_y);
+  pad.substickX = DecodeStick(cstick_x);
+  pad.substickY = DecodeStick(cstick_y);
+
+  return pad;
+}
+}  // namespace
+
+// ---------------------------------------------------------------------------
+// AIController — emu-thread façade.  Reads game state, submits to backend.
+// ---------------------------------------------------------------------------
+
+AIController::AIController() = default;
+AIController::~AIController() { Shutdown(); }
+
+bool AIController::Load(const std::string& onnx_path)
+{
+  Shutdown();
+  auto backend = std::make_unique<LocalOnnxBackend>();
+  if (!backend->Load(onnx_path))
+    return false;
+  m_backend = std::move(backend);
+  return true;
+}
+
+void AIController::Shutdown()
+{
+  if (m_backend)
+  {
+    m_backend->Shutdown();
+    m_backend.reset();
+  }
+  m_prev_phase_family = -1;
+  m_phase_active      = false;
+}
+
+bool AIController::IsLoaded() const { return m_backend != nullptr; }
+
+bool AIController::IsMatchActive() const
+{
+  return m_phase_active && m_backend && m_backend->HasOutput();
+}
+
+GCPadStatus AIController::GetLastOutput() const
+{
+  if (!m_backend)
+  {
+    GCPadStatus pad{};
+    pad.stickX = pad.stickY = pad.substickX = pad.substickY = 0x80;
+    pad.isConnected = true;
+    return pad;
+  }
+  return m_backend->GetLastOutput();
+}
+
+void AIController::OnFrameEnd(int controlled_port, bool mirror_x)
+{
+  // Emu-thread windowed timing buckets.  infer_ms now lives on the worker
+  // thread (see LocalOnnxBackend::WorkerLoop); here we track gs_ms (cost of
+  // ReadGameStateCore) and interval_ms (true emu-thread cadence).
+  static WindowedStats s_stats_gs(10.0f);
+  static WindowedStats s_stats_interval(17.0f);  // >16.67ms = below 60fps
+  static std::chrono::steady_clock::time_point s_last_frame_end{};
+  auto invalidate_interval = []() {
+    s_last_frame_end = std::chrono::steady_clock::time_point{};
+  };
+
+  if (!m_backend)
+  {
+    invalidate_interval();
+    return;
+  }
+
+  // Read game phase to detect segment boundaries (mirrors build_dataset.py segmentation).
+  constexpr uint32_t CGAME_SINGLETON = 0x80373708;
+  uint32_t cGamePtr   = Memory::Read_U32(CGAME_SINGLETON);
+  uint32_t game_phase = (cGamePtr != 0) ? Memory::Read_U32(cGamePtr + 0x24) : 0;
+
+  // phase_family: 1=kickoff, 4=active play (phases 4 and 5), -1=everything else
+  int phase_family = -1;
+  if (game_phase == 1)
+    phase_family = 1;
+  else if (game_phase == 4 || game_phase == 5)
+    phase_family = 4;
+
+  bool phase_changed  = (phase_family != m_prev_phase_family);
+  m_prev_phase_family = phase_family;
+
+  if (phase_family == -1)
+  {
+    // Outside active play (celebrations, menus, etc.) — backend will reset
+    // its KV/prev_labels on the next active frame via reset_context.
+    m_phase_active = false;
+    invalidate_interval();
+    return;
+  }
+
+  m_phase_active = true;
+
+  auto t_frame_start = std::chrono::steady_clock::now();
+
+  if (s_last_frame_end != std::chrono::steady_clock::time_point{})
+  {
+    float interval_ms =
+        std::chrono::duration<float, std::milli>(t_frame_start - s_last_frame_end).count();
+    s_stats_interval.Push(interval_ms);
+  }
+
+  std::vector<float> core_features = ReadGameStateCore(controlled_port, mirror_x);
+  if (core_features.empty())
+  {
+    invalidate_interval();
+    return;
+  }
+
+  auto t_gs_end = std::chrono::steady_clock::now();
+  float ms_gs   = std::chrono::duration<float, std::milli>(t_gs_end - t_frame_start).count();
+  s_stats_gs.Push(ms_gs);
+  s_last_frame_end = t_gs_end;
+
+  // Hand off to the worker — non-blocking.
+  AIInputFrame frame;
+  frame.core_features = std::move(core_features);
+  frame.reset_context = phase_changed;
+  frame.mirror_x      = mirror_x;
+  m_backend->Submit(std::move(frame));
+
+  // Dump emu-thread stats every ~10s.
+  if (s_stats_gs.Full())
+  {
+    s_stats_gs.Dump      ("gs_ms      ");
+    s_stats_interval.Dump("interval_ms");
+    s_stats_gs.Reset();
+    s_stats_interval.Reset();
   }
 }
 
 // ---------------------------------------------------------------------------
 // Feature extraction — mirrors build_dataset.py::extract_features() v6 exactly
 // ---------------------------------------------------------------------------
-// Layout (194 total = 183 core + 11 prev_labels):
+// Returns the 183-float CORE feature vector. The trailing 11 prev_labels are
+// appended by BuildFullFeatures() to form the 194-float model input.
+// Full layout (194 total = 183 core + 11 prev_labels):
 //   1. Ball (11): pos(3) + vel(3) + charge(1) + perfect_pass(1) + ball_to_goal(3)
 //   2. Ball owner one-hot (11)
 //   3. Self character (19): Δpos(3) + state_idx(1) + heading(2) + goal(3)
@@ -531,7 +886,7 @@ void AIController::OnFrameEnd(int controlled_port, bool mirror_x)
 //  13. Phase booleans (2): is_kickoff + goalie_has_ball
 //  14. Previous frame action (11): 7 buttons + 4 sticks
 
-std::vector<float> AIController::ReadGameState(int controlled_port, bool mirror_x) const
+std::vector<float> AIController::ReadGameStateCore(int controlled_port, bool mirror_x) const
 {
   const AddressSpace::Accessors* acc =
       AddressSpace::GetAccessors(AddressSpace::Type::Effective);
@@ -632,9 +987,9 @@ std::vector<float> AIController::ReadGameState(int controlled_port, bool mirror_
                  ball_ptr, bpx, bpy, self_slot, sc_px, sc_py, game_phase);
   }
 
-  // ── Build feature vector (194 dims) ────────────────────────────────────────
+  // ── Build core feature vector (183 dims; prev_labels appended later) ───────
   std::vector<float> feat;
-  feat.reserve(FEATURE_DIM);
+  feat.reserve(AIModelDims::CORE_FEATURE_DIM);
 
   // --- 1. Ball (11) ---
   feat.push_back(bpx);
@@ -926,110 +1281,16 @@ std::vector<float> AIController::ReadGameState(int controlled_port, bool mirror_
   feat.push_back(game_phase == 1 ? 1.0f : 0.0f);          // is_kickoff
   feat.push_back(owner_slot == own_goalie_slot ? 1.0f : 0.0f);  // goalie_has_ball
 
-  // --- 14. Previous frame action (11) ---
-  for (int i = 0; i < PREV_ACTION_DIM; i++)
-    feat.push_back(m_prev_labels[i]);
+  // --- 14. Previous frame action (11) is appended by BuildFullFeatures(). ----
 
-  if (static_cast<int>(feat.size()) != FEATURE_DIM)
+  if (static_cast<int>(feat.size()) != AIModelDims::CORE_FEATURE_DIM)
   {
-    ERROR_LOG_FMT(CORE, "AIController: feature dim mismatch: got {} expected {}",
-                  feat.size(), FEATURE_DIM);
+    ERROR_LOG_FMT(CORE, "AIController: core feature dim mismatch: got {} expected {}",
+                  feat.size(), AIModelDims::CORE_FEATURE_DIM);
     return {};
   }
 
   return feat;
-}
-
-// ---------------------------------------------------------------------------
-// DecodeOutput (v7: action vocabulary — btn_probs are 0/1 flags from categorical)
-// ---------------------------------------------------------------------------
-// Button indices: 0=A, 1=B, 2=X, 3=Y, 4=lob_pass, 5=chip_shot, 6=R
-// lob_pass  fires → set L+A on pad
-// chip_shot fires → set L+B on pad
-
-GCPadStatus AIController::DecodeOutput(const float* btn_probs, const float* stick_vals,
-                                        bool mirror_x)
-{
-  GCPadStatus pad{};
-  pad.isConnected = true;
-  pad.button      = PAD_USE_ORIGIN;
-
-  // Action vocabulary: btn_probs are now 0/1 flags from categorical sampling.
-  // Simple threshold to convert float to bool.
-  bool btn_state[BUTTON_DIM_OUT];
-  for (int i = 0; i < BUTTON_DIM_OUT; i++)
-    btn_state[i] = btn_probs[i] > 0.5f;
-
-  bool has_a         = btn_state[0];
-  bool has_b         = btn_state[1];
-  bool has_x         = btn_state[2];
-  bool has_y         = btn_state[3];
-  bool has_lob_pass  = btn_state[4];
-  bool has_chip_shot = btn_state[5];
-  bool has_r         = btn_state[6];
-
-  // A: direct pass / switch. lob_pass also implies A.
-  if (has_a || has_lob_pass)
-  {
-    pad.button |= PAD_BUTTON_A;
-    pad.analogA = 0xFF;
-  }
-
-  // B: direct shot / slide. chip_shot also implies B.
-  if (has_b || has_chip_shot)
-  {
-    pad.button |= PAD_BUTTON_B;
-    pad.analogB = 0xFF;
-  }
-
-  if (has_x)  pad.button |= PAD_BUTTON_X;
-  if (has_y)  pad.button |= PAD_BUTTON_Y;
-
-  // L: only set via composite lob_pass or chip_shot (never standalone)
-  if (has_lob_pass || has_chip_shot)
-  {
-    pad.button |= PAD_TRIGGER_L;
-    pad.triggerLeft = 0xFF;
-  }
-
-  if (has_r)
-  {
-    pad.button |= PAD_TRIGGER_R;
-    pad.triggerRight = 0xFF;
-  }
-
-  // stick_vals are in [-1, 1] canonical (attacks-right) space.
-  // Mirror stick_x/cstick_x back to native GC orientation if needed.
-  auto DecodeStick = [](float val) -> uint8_t {
-    float raw = val * 128.0f + 128.0f;
-    return static_cast<uint8_t>(std::max(0.0f, std::min(255.0f, raw)));
-  };
-
-  float stick_x  = stick_vals[0];
-  float stick_y  = stick_vals[1];
-  float cstick_x = stick_vals[2];
-  float cstick_y = stick_vals[3];
-
-  // C-stick deadzone: soft expected value pulls c-stick off-neutral even when the
-  // model's peak is at bin 10 (neutral).  C-stick is neutral 81-90% of the time in
-  // training data, so snap small values to zero.  Threshold of 0.4 (~bin 6/14)
-  // ensures only intentional dekes register.
-  constexpr float kCStickDeadzone = 0.4f;
-  if (std::abs(cstick_x) < kCStickDeadzone) cstick_x = 0.0f;
-  if (std::abs(cstick_y) < kCStickDeadzone) cstick_y = 0.0f;
-
-  if (mirror_x)
-  {
-    stick_x  = -stick_x;
-    cstick_x = -cstick_x;
-  }
-
-  pad.stickX    = DecodeStick(stick_x);
-  pad.stickY    = DecodeStick(stick_y);
-  pad.substickX = DecodeStick(cstick_x);
-  pad.substickY = DecodeStick(cstick_y);
-
-  return pad;
 }
 
 }  // namespace Movie
