@@ -306,11 +306,15 @@ void OnFrameEnd()
 
   if (Memory::Read_U8(Metadata::addressMatchStart) == 1)
   {
-    // Only log on the first fire (address stays 1 for the entire match)
+    // Only log on the first fire (address stays 1 for the entire match).
+    // NOTE: kept as log-only because OSD is noisy in normal play.  If we go
+    // back to running CIT->CITF conversion headlessly (where the log isn't
+    // visible), switch this and the other CITF diagnostics in this file back
+    // to Core::DisplayMessage.
     if (!GameStateCapture::IsCapturing())
     {
-      Core::DisplayMessage(fmt::format("CITF: match start fired: IsPlayingInput={} IsCapturing={} matchMode={}",
-                                       Movie::IsPlayingInput(), GameStateCapture::IsCapturing(), Metadata::getMatchMode()), 3000);
+      INFO_LOG_FMT(CORE, "CITF: match start fired: IsPlayingInput={} IsCapturing={} matchMode={}",
+                   Movie::IsPlayingInput(), GameStateCapture::IsCapturing(), Metadata::getMatchMode());
     }
     // training mode
     if (Memory::Read_U8(Metadata::addressCustomTrainingModeEnabled) == 1 && Metadata::getMatchMode() == 1 && !NetPlay::IsNetPlayRunning() && !Movie::IsPlayingInput())
@@ -352,8 +356,8 @@ void OnFrameEnd()
     // During replay playback, begin per-frame game state capture
     if (Movie::IsPlayingInput() && !GameStateCapture::IsCapturing())
     {
-      Core::DisplayMessage(fmt::format("CITF: BeginCapture stem='{}' dir='{}'",
-                                       Movie::GetCITStemName(), Movie::GetCITDirPath()), 3000);
+      INFO_LOG_FMT(CORE, "CITF: BeginCapture stem='{}' dir='{}'",
+                   Movie::GetCITStemName(), Movie::GetCITDirPath());
       GameStateCapture::BeginCapture();
     }
 
@@ -491,9 +495,9 @@ void OnFrameEnd()
     float gameClockElapsed = 0.0f;
     u32 gameClockRaw = Memory::Read_U32(0x80400004);
     std::memcpy(&gameClockElapsed, &gameClockRaw, sizeof(float));
-    Core::DisplayMessage(fmt::format("CITF: match end fired: IsPlayingInput={} IsCapturing={} matchMode={} movieFrame={} gameClock={:.3f}",
-                                     Movie::IsPlayingInput(), GameStateCapture::IsCapturing(), Metadata::getMatchMode(),
-                                     Movie::GetCurrentFrame(), gameClockElapsed), 3000);
+    INFO_LOG_FMT(CORE, "CITF: match end fired: IsPlayingInput={} IsCapturing={} matchMode={} movieFrame={} gameClock={:.3f}",
+                 Movie::IsPlayingInput(), GameStateCapture::IsCapturing(), Metadata::getMatchMode(),
+                 Movie::GetCurrentFrame(), gameClockElapsed);
     // training mode
     if (Memory::Read_U8(Metadata::addressCustomTrainingModeEnabled) && Metadata::getMatchMode() == 1 && !NetPlay::IsNetPlayRunning())
     {
@@ -510,12 +514,12 @@ void OnFrameEnd()
       std::string basename = cit_stem.empty() ? "output" : cit_stem;
       std::string dir = cit_dir.empty() ? File::GetUserPath(D_CITRUSREPLAYS_IDX) : (cit_dir + "/");
       std::string output_path = dir + basename + ".citframes";
-      Core::DisplayMessage(fmt::format("CITF: EndCapture -> '{}'", output_path), 3000);
+      INFO_LOG_FMT(CORE, "CITF: EndCapture -> '{}'", output_path);
       GameStateCapture::EndCapture(output_path);
     }
     else
     {
-      Core::DisplayMessage("CITF: match end fired but IsCapturing=false — CITF will not be written", 3000);
+      WARN_LOG_FMT(CORE, "CITF: match end fired but IsCapturing=false — CITF will not be written");
     }
 
     if (!StateAuxillary::getBoolMatchEnd() && !Movie::IsPlayingInput())
