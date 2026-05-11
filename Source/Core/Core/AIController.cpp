@@ -8,10 +8,13 @@
 #include "Core/AIController.h"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <condition_variable>
+#include <cstdint>
 #include <cstring>
+#include <functional>
 #include <mutex>
 #include <numeric>
 #include <optional>
@@ -20,6 +23,7 @@
 #include <utility>
 
 #include "Common/Logging/Log.h"
+#include "Core/Core.h"
 #include "Core/HW/AddressSpace.h"
 #include "Core/HW/Memmap.h"
 #include "Core/Metadata.h"
@@ -35,12 +39,35 @@
 #pragma warning(pop)
 #endif
 
+// ---------------------------------------------------------------------------
+// Cross-platform socket headers.  IpcBackend uses TCP loopback so the same
+// code path validates on Windows (Winsock2) before deploying to Linux
+// (BSD sockets).  All socket APIs used below have matching signatures across
+// the two — only the headers, init/shutdown, error retrieval, and close call
+// differ, which we wrap in tiny inline helpers.
+// ---------------------------------------------------------------------------
 #ifdef _WIN32
-// For SetThreadPriority on the inference worker.
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#pragma comment(lib, "Ws2_32.lib")
+using socket_t = SOCKET;
+#define IPC_INVALID_SOCKET INVALID_SOCKET
+#define IPC_SOCKET_ERROR   SOCKET_ERROR
+#else
+#include <arpa/inet.h>
+#include <errno.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
+#include <sys/socket.h>
+#include <sys/types.h>
+#include <unistd.h>
+using socket_t = int;
+#define IPC_INVALID_SOCKET (-1)
+#define IPC_SOCKET_ERROR   (-1)
 #endif
 
 namespace Movie
@@ -307,6 +334,97 @@ static InventorySlot ReadInventorySlot(uint32_t team_ptr, int slot_index)
 }
 
 // ---------------------------------------------------------------------------
+// DecodeOutput — shared by all backends that emit (btn_probs, stick_vals).
+// Single source of truth for action-vocab decoding, C-stick deadzone, and
+// mirror_x flipping, so LocalOnnxBackend and IpcBackend produce identical
+// pads given identical model outputs.
+// ---------------------------------------------------------------------------
+
+namespace
+{
+GCPadStatus DecodeOutput(const float* btn_probs, const float* stick_vals, bool mirror_x)
+{
+  GCPadStatus pad{};
+  pad.isConnected = true;
+  pad.button      = PAD_USE_ORIGIN;
+
+  bool btn_state[AIModelDims::BUTTON_DIM_OUT];
+  for (int i = 0; i < AIModelDims::BUTTON_DIM_OUT; i++)
+    btn_state[i] = btn_probs[i] > 0.5f;
+
+  const bool has_a         = btn_state[0];
+  const bool has_b         = btn_state[1];
+  const bool has_x         = btn_state[2];
+  const bool has_y         = btn_state[3];
+  const bool has_lob_pass  = btn_state[4];
+  const bool has_chip_shot = btn_state[5];
+  const bool has_r         = btn_state[6];
+
+  if (has_a || has_lob_pass)
+  {
+    pad.button |= PAD_BUTTON_A;
+    pad.analogA = 0xFF;
+  }
+  if (has_b || has_chip_shot)
+  {
+    pad.button |= PAD_BUTTON_B;
+    pad.analogB = 0xFF;
+  }
+  if (has_x)
+    pad.button |= PAD_BUTTON_X;
+  if (has_y)
+    pad.button |= PAD_BUTTON_Y;
+  if (has_lob_pass || has_chip_shot)
+  {
+    pad.button |= PAD_TRIGGER_L;
+    pad.triggerLeft = 0xFF;
+  }
+  if (has_r)
+  {
+    pad.button |= PAD_TRIGGER_R;
+    pad.triggerRight = 0xFF;
+  }
+
+  auto DecodeStick = [](float val) -> uint8_t {
+    float raw = val * 128.0f + 128.0f;
+    return static_cast<uint8_t>(std::max(0.0f, std::min(255.0f, raw)));
+  };
+
+  float stick_x  = stick_vals[0];
+  float stick_y  = stick_vals[1];
+  float cstick_x = stick_vals[2];
+  float cstick_y = stick_vals[3];
+
+  // C-stick deadzone: snap small values to neutral so only intentional dekes register.
+  constexpr float kCStickDeadzone = 0.4f;
+  if (std::abs(cstick_x) < kCStickDeadzone)
+    cstick_x = 0.0f;
+  if (std::abs(cstick_y) < kCStickDeadzone)
+    cstick_y = 0.0f;
+
+  if (mirror_x)
+  {
+    stick_x  = -stick_x;
+    cstick_x = -cstick_x;
+  }
+
+  pad.stickX    = DecodeStick(stick_x);
+  pad.stickY    = DecodeStick(stick_y);
+  pad.substickX = DecodeStick(cstick_x);
+  pad.substickY = DecodeStick(cstick_y);
+
+  // Start is not in the action vocab; decoded output should never carry it.
+  // Warn if it ever shows up so we catch decoder/vocab regressions.
+  if (pad.button & PAD_BUTTON_START)
+  {
+    WARN_LOG_FMT(CORE, "AIController: decoded pad has PAD_BUTTON_START set "
+                       "(not in action vocab) btn=0x{:04X}", pad.button);
+  }
+  return pad;
+}
+}  // namespace
+
+// ---------------------------------------------------------------------------
 // LocalOnnxBackend — runs ONNX Runtime on a dedicated worker thread.
 // Owns: ORT session, KV cache, prev_labels, output slot.
 // All public methods are thread-safe per the AIInferenceBackend contract.
@@ -330,8 +448,6 @@ public:
 
 private:
   void        WorkerLoop();
-  GCPadStatus DecodeOutput(const float* btn_probs, const float* stick_vals,
-                           bool mirror_x);
   std::vector<float> BuildFullFeatures(const std::vector<float>& core) const;
 
   // ORT session — touched only by Load()/Shutdown() (emu thread, before/after
@@ -660,76 +776,638 @@ void LocalOnnxBackend::WorkerLoop()
   }
 }
 
-GCPadStatus LocalOnnxBackend::DecodeOutput(const float* btn_probs, const float* stick_vals,
-                                            bool mirror_x)
+// ---------------------------------------------------------------------------
+// IpcBackend — sibling of LocalOnnxBackend that round-trips AIInputFrames to
+// a Python RL trainer over a TCP loopback socket.  No ONNX/no KV cache: the
+// trainer owns the policy and per-env state; this class is just a marshaller.
+//
+// Topology (matches slippi-ai's Slippstream pattern):
+//   - Dolphin process is the SERVER: binds + listens on AIIpcPort.
+//   - Python is the CLIENT: connects with retry-to-30s after launching the
+//     subprocess (each Dolphin instance gets its own port, picked by Python
+//     via portpicker).
+//
+// Wire format (all native little-endian; fixed-size length prefix excludes
+// itself):
+//
+//   STATE   (Dolphin → Python, every frame, tag 0x01):
+//     u32 payload_len
+//     u8  tag              = 0x01
+//     u32 frame_id         (monotonic per-controller; echoed in ACTION)
+//     u8  reset_context    (1 = first frame after a phase / episode reset)
+//     u8  mirror_x         (1 = AI's team attacks left; X already flipped
+//                           in core_features, but Python mirrors stick output)
+//     u16 score_left
+//     u16 score_right
+//     f32 core_features[CORE_FEATURE_DIM]   (183 floats = 732 bytes)
+//
+//   ACTION  (Python → Dolphin, tag 0x02):
+//     u32 payload_len
+//     u8  tag              = 0x02
+//     u32 frame_id         (echoed; older-than-current frames are dropped)
+//     f32 btn_probs[7]
+//     f32 stick_vals[4]
+//
+//   RESET   (Python → Dolphin, tag 0x10):
+//     u32 payload_len
+//     u8  tag              = 0x10
+//     u32 savestate_id     (interpreted by the reset callback)
+//
+//   SHUTDOWN (Python → Dolphin, tag 0x11):
+//     u32 payload_len
+//     u8  tag              = 0x11
+//
+// Threading:
+//   - Listen thread: blocks on accept().  Once a client connects, it spawns
+//     the sender + receiver threads and exits (single-client per session).
+//   - Sender thread: condvar-wakes on Submit() (latest-wins like the local
+//     backend), serializes one STATE packet, send()s it.
+//   - Receiver thread: blocks on recv(), parses one packet, decodes ACTION
+//     into GCPadStatus + publishes to output slot, or invokes reset callback
+//     for control packets.
+// ---------------------------------------------------------------------------
+
+// (continues the same anonymous namespace as LocalOnnxBackend above)
+constexpr uint8_t IPC_TAG_STATE    = 0x01;
+constexpr uint8_t IPC_TAG_ACTION   = 0x02;
+constexpr uint8_t IPC_TAG_RESET    = 0x10;
+constexpr uint8_t IPC_TAG_SHUTDOWN = 0x11;
+constexpr uint8_t IPC_TAG_PAUSE    = 0x12;
+constexpr uint8_t IPC_TAG_RESUME   = 0x13;
+
+inline int IpcLastError()
 {
-  GCPadStatus pad{};
-  pad.isConnected = true;
-  pad.button      = PAD_USE_ORIGIN;
-
-  bool btn_state[AIModelDims::BUTTON_DIM_OUT];
-  for (int i = 0; i < AIModelDims::BUTTON_DIM_OUT; i++)
-    btn_state[i] = btn_probs[i] > 0.5f;
-
-  bool has_a         = btn_state[0];
-  bool has_b         = btn_state[1];
-  bool has_x         = btn_state[2];
-  bool has_y         = btn_state[3];
-  bool has_lob_pass  = btn_state[4];
-  bool has_chip_shot = btn_state[5];
-  bool has_r         = btn_state[6];
-
-  if (has_a || has_lob_pass)
-  {
-    pad.button |= PAD_BUTTON_A;
-    pad.analogA = 0xFF;
-  }
-  if (has_b || has_chip_shot)
-  {
-    pad.button |= PAD_BUTTON_B;
-    pad.analogB = 0xFF;
-  }
-  if (has_x)  pad.button |= PAD_BUTTON_X;
-  if (has_y)  pad.button |= PAD_BUTTON_Y;
-  if (has_lob_pass || has_chip_shot)
-  {
-    pad.button |= PAD_TRIGGER_L;
-    pad.triggerLeft = 0xFF;
-  }
-  if (has_r)
-  {
-    pad.button |= PAD_TRIGGER_R;
-    pad.triggerRight = 0xFF;
-  }
-
-  auto DecodeStick = [](float val) -> uint8_t {
-    float raw = val * 128.0f + 128.0f;
-    return static_cast<uint8_t>(std::max(0.0f, std::min(255.0f, raw)));
-  };
-
-  float stick_x  = stick_vals[0];
-  float stick_y  = stick_vals[1];
-  float cstick_x = stick_vals[2];
-  float cstick_y = stick_vals[3];
-
-  // C-stick deadzone: snap small values to neutral so only intentional dekes register.
-  constexpr float kCStickDeadzone = 0.4f;
-  if (std::abs(cstick_x) < kCStickDeadzone) cstick_x = 0.0f;
-  if (std::abs(cstick_y) < kCStickDeadzone) cstick_y = 0.0f;
-
-  if (mirror_x)
-  {
-    stick_x  = -stick_x;
-    cstick_x = -cstick_x;
-  }
-
-  pad.stickX    = DecodeStick(stick_x);
-  pad.stickY    = DecodeStick(stick_y);
-  pad.substickX = DecodeStick(cstick_x);
-  pad.substickY = DecodeStick(cstick_y);
-
-  return pad;
+#ifdef _WIN32
+  return ::WSAGetLastError();
+#else
+  return errno;
+#endif
 }
+
+inline void IpcCloseSocket(socket_t s)
+{
+  if (s == IPC_INVALID_SOCKET)
+    return;
+#ifdef _WIN32
+  ::closesocket(s);
+#else
+  ::close(s);
+#endif
+}
+
+// Winsock requires explicit init/teardown; on POSIX these are no-ops.
+class WinsockGuard
+{
+public:
+  WinsockGuard()
+  {
+#ifdef _WIN32
+    WSADATA d{};
+    m_ok = (::WSAStartup(MAKEWORD(2, 2), &d) == 0);
+#endif
+  }
+  ~WinsockGuard()
+  {
+#ifdef _WIN32
+    if (m_ok)
+      ::WSACleanup();
+#endif
+  }
+  bool ok() const
+  {
+#ifdef _WIN32
+    return m_ok;
+#else
+    return true;
+#endif
+  }
+
+private:
+#ifdef _WIN32
+  bool m_ok = false;
+#endif
+};
+
+// Read exactly `n` bytes from `s` into `buf`.  Returns 0 on orderly peer
+// close, >0 (errno / WSA error) on socket error, never blocks past recv().
+// Caller logs the distinction so we can tell graceful FIN vs. RST / dead
+// connection (especially relevant on Windows where AV / firewall can RST
+// loopback connections silently).
+int RecvAllErr(socket_t s, void* buf, size_t n)
+{
+  uint8_t* p = static_cast<uint8_t*>(buf);
+  while (n > 0)
+  {
+    int chunk = ::recv(s, reinterpret_cast<char*>(p),
+                       static_cast<int>(std::min<size_t>(n, 1 << 20)), 0);
+    if (chunk == 0)
+      return 0;  // peer closed (orderly FIN)
+    if (chunk < 0)
+    {
+#ifndef _WIN32
+      if (errno == EINTR)
+        continue;
+#endif
+      return IpcLastError();
+    }
+    p += chunk;
+    n -= static_cast<size_t>(chunk);
+  }
+  return -1;  // sentinel: success (no bytes to read)
+}
+
+bool RecvAll(socket_t s, void* buf, size_t n)
+{
+  return RecvAllErr(s, buf, n) == -1;
+}
+
+bool SendAll(socket_t s, const void* buf, size_t n)
+{
+  const uint8_t* p = static_cast<const uint8_t*>(buf);
+  while (n > 0)
+  {
+    int chunk = ::send(s, reinterpret_cast<const char*>(p),
+                       static_cast<int>(std::min<size_t>(n, 1 << 20)), 0);
+    if (chunk <= 0)
+    {
+#ifndef _WIN32
+      if (chunk < 0 && errno == EINTR)
+        continue;
+#endif
+      return false;
+    }
+    p += chunk;
+    n -= static_cast<size_t>(chunk);
+  }
+  return true;
+}
+
+class IpcBackend : public AIInferenceBackend
+{
+public:
+  IpcBackend() = default;
+  ~IpcBackend() override { Shutdown(); }
+
+  bool Listen(int port, AIController::ResetCallback reset_cb);
+
+  // AIInferenceBackend
+  void        Submit(AIInputFrame frame) override;
+  GCPadStatus GetLastOutput() const override;
+  bool        HasOutput() const override;
+  void        Shutdown() override;
+
+private:
+  void AcceptLoop();
+  void SenderLoop();
+  void ReceiverLoop();
+  void HandleAction(uint32_t frame_id, const float* btn_probs,
+                    const float* stick_vals);
+  void StopThreads();
+
+  WinsockGuard                m_winsock;
+  AIController::ResetCallback m_reset_cb;
+  int                         m_port      = 0;
+
+  socket_t                    m_listen_sock = IPC_INVALID_SOCKET;
+  std::atomic<socket_t>       m_client_sock{IPC_INVALID_SOCKET};
+
+  std::thread                 m_acceptor;
+  std::thread                 m_sender;
+  std::thread                 m_receiver;
+
+  // Sender input slot — same single-slot/latest-wins pattern as LocalOnnxBackend.
+  mutable std::mutex          m_in_mu;
+  std::condition_variable     m_in_cv;
+  std::optional<AIInputFrame> m_pending;
+  std::atomic<bool>           m_stop{false};
+
+  // Output slot.
+  mutable std::mutex m_out_mu;
+  GCPadStatus        m_last_output{};
+  bool               m_has_output = false;
+
+  // Stale-action filter: actions older than this frame_id are dropped.
+  // Sender writes; receiver reads.  Atomic suffices.
+  std::atomic<uint32_t> m_latest_sent_frame{0};
+
+  // Mirror_x state: receiver needs it to flip stick output, but it lives on
+  // the AIInputFrame submitted by the sender.  Latch the most recent value.
+  std::atomic<uint8_t> m_latest_mirror_x{0};
+
+  // Whether the client side has finished its initial connect.  Used so
+  // Submit() can early-out before a client is hooked up (avoids unbounded
+  // pending growth — though latest-wins makes that bounded anyway).
+  std::atomic<bool> m_client_connected{false};
+
+  // Tracks whether we issued an IPC_TAG_PAUSE that hasn't yet been matched
+  // by an IPC_TAG_RESUME.  If the connection drops while this is set (e.g.
+  // Python crashed mid-update), the receiver loop auto-resumes on exit so
+  // the user isn't stranded with a frozen game.
+  std::atomic<bool> m_we_paused{false};
+};
+
+bool IpcBackend::Listen(int port, AIController::ResetCallback reset_cb)
+{
+  Shutdown();
+
+  if (!m_winsock.ok())
+  {
+    ERROR_LOG_FMT(CORE, "IpcBackend: WSAStartup failed");
+    return false;
+  }
+
+  m_port     = port;
+  m_reset_cb = std::move(reset_cb);
+
+  m_listen_sock = ::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+  if (m_listen_sock == IPC_INVALID_SOCKET)
+  {
+    ERROR_LOG_FMT(CORE, "IpcBackend: socket() failed: err={}", IpcLastError());
+    return false;
+  }
+
+  // SO_REUSEADDR so quick restarts don't TIME_WAIT-block.  On Windows this
+  // also disables the "address already in use" warning that fires when the
+  // previous Dolphin run hasn't fully released the port yet.
+  int yes = 1;
+  ::setsockopt(m_listen_sock, SOL_SOCKET, SO_REUSEADDR,
+               reinterpret_cast<const char*>(&yes), sizeof(yes));
+
+  sockaddr_in addr{};
+  addr.sin_family      = AF_INET;
+  addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  addr.sin_port        = htons(static_cast<uint16_t>(port));
+
+  if (::bind(m_listen_sock, reinterpret_cast<sockaddr*>(&addr),
+             sizeof(addr)) == IPC_SOCKET_ERROR)
+  {
+    ERROR_LOG_FMT(CORE, "IpcBackend: bind(127.0.0.1:{}) failed: err={}",
+                  port, IpcLastError());
+    IpcCloseSocket(m_listen_sock);
+    m_listen_sock = IPC_INVALID_SOCKET;
+    return false;
+  }
+
+  if (::listen(m_listen_sock, 1) == IPC_SOCKET_ERROR)
+  {
+    ERROR_LOG_FMT(CORE, "IpcBackend: listen() failed: err={}", IpcLastError());
+    IpcCloseSocket(m_listen_sock);
+    m_listen_sock = IPC_INVALID_SOCKET;
+    return false;
+  }
+
+  m_stop.store(false);
+  m_acceptor = std::thread(&IpcBackend::AcceptLoop, this);
+
+  INFO_LOG_FMT(CORE, "IpcBackend: listening on 127.0.0.1:{}", port);
+  return true;
+}
+
+void IpcBackend::AcceptLoop()
+{
+  // Single-client design: the first client to connect owns the session.  If
+  // it disconnects we tear down the session; Python is responsible for
+  // killing+respawning Dolphin to recover (matches slippi-ai's
+  // SafeEnvironment pattern).
+  sockaddr_in peer{};
+#ifdef _WIN32
+  int peer_len = sizeof(peer);
+#else
+  socklen_t peer_len = sizeof(peer);
+#endif
+  socket_t client = ::accept(m_listen_sock,
+                             reinterpret_cast<sockaddr*>(&peer), &peer_len);
+  if (client == IPC_INVALID_SOCKET)
+  {
+    if (!m_stop.load())
+      ERROR_LOG_FMT(CORE, "IpcBackend: accept() failed: err={}", IpcLastError());
+    return;
+  }
+
+  // Disable Nagle — every packet is a discrete frame, latency > throughput.
+  int yes = 1;
+  ::setsockopt(client, IPPROTO_TCP, TCP_NODELAY,
+               reinterpret_cast<const char*>(&yes), sizeof(yes));
+
+  m_client_sock.store(client);
+  m_client_connected.store(true);
+  INFO_LOG_FMT(CORE, "IpcBackend: client connected on port {}", m_port);
+
+  m_sender   = std::thread(&IpcBackend::SenderLoop,   this);
+  m_receiver = std::thread(&IpcBackend::ReceiverLoop, this);
+}
+
+void IpcBackend::Submit(AIInputFrame frame)
+{
+  if (!m_client_connected.load())
+    return;  // no peer yet — drop silently; latest-wins on reconnect
+  m_latest_mirror_x.store(frame.mirror_x ? 1 : 0);
+  {
+    std::lock_guard<std::mutex> lk(m_in_mu);
+    m_pending = std::move(frame);
+  }
+  m_in_cv.notify_one();
+}
+
+GCPadStatus IpcBackend::GetLastOutput() const
+{
+  std::lock_guard<std::mutex> lk(m_out_mu);
+  return m_last_output;
+}
+
+bool IpcBackend::HasOutput() const
+{
+  std::lock_guard<std::mutex> lk(m_out_mu);
+  return m_has_output;
+}
+
+void IpcBackend::SenderLoop()
+{
+  WindowedStats stats_send(5.0f);  // >5ms per send = bad; loopback should be <1ms
+
+  while (true)
+  {
+    AIInputFrame frame;
+    {
+      std::unique_lock<std::mutex> lk(m_in_mu);
+      m_in_cv.wait(lk, [this] { return m_stop.load() || m_pending.has_value(); });
+      if (m_stop.load() && !m_pending.has_value())
+        return;
+      frame = std::move(*m_pending);
+      m_pending.reset();
+    }
+
+    if (static_cast<int>(frame.core_features.size()) != AIModelDims::CORE_FEATURE_DIM)
+    {
+      WARN_LOG_FMT(CORE, "IpcBackend: dropping frame with bad core size {}",
+                   frame.core_features.size());
+      continue;
+    }
+
+    // Build packet.  Layout is fixed-size so Python can struct.unpack() with
+    // a single format string per packet type.
+    constexpr size_t kFeatBytes  = sizeof(float) * AIModelDims::CORE_FEATURE_DIM;
+    constexpr uint32_t kPayloadBytes =
+        1 /* tag */ + 4 /* frame_id */ + 1 /* reset */ + 1 /* mirror */ +
+        2 /* score_left */ + 2 /* score_right */ +
+        static_cast<uint32_t>(kFeatBytes);
+
+    std::vector<uint8_t> pkt;
+    pkt.reserve(4 + kPayloadBytes);
+    auto append = [&](const void* p, size_t n) {
+      const uint8_t* src = static_cast<const uint8_t*>(p);
+      pkt.insert(pkt.end(), src, src + n);
+    };
+    const uint32_t len_le = kPayloadBytes;
+    append(&len_le, 4);
+    const uint8_t tag = IPC_TAG_STATE;
+    append(&tag, 1);
+    append(&frame.frame_id,    4);
+    const uint8_t reset_b  = frame.reset_context ? 1 : 0;
+    const uint8_t mirror_b = frame.mirror_x      ? 1 : 0;
+    append(&reset_b,  1);
+    append(&mirror_b, 1);
+    append(&frame.score_left,  2);
+    append(&frame.score_right, 2);
+    append(frame.core_features.data(), kFeatBytes);
+
+    socket_t s = m_client_sock.load();
+    if (s == IPC_INVALID_SOCKET)
+      return;
+
+    auto t0 = std::chrono::steady_clock::now();
+    if (!SendAll(s, pkt.data(), pkt.size()))
+    {
+      WARN_LOG_FMT(CORE, "IpcBackend: send failed (peer closed?); err={}",
+                   IpcLastError());
+      m_stop.store(true);
+      m_in_cv.notify_all();
+      return;
+    }
+    auto t1 = std::chrono::steady_clock::now();
+
+    m_latest_sent_frame.store(frame.frame_id);
+    stats_send.Push(std::chrono::duration<float, std::milli>(t1 - t0).count());
+    if (stats_send.Full())
+    {
+      stats_send.Dump("ipc_send_ms");
+      stats_send.Reset();
+    }
+  }
+}
+
+void IpcBackend::ReceiverLoop()
+{
+  while (!m_stop.load())
+  {
+    socket_t s = m_client_sock.load();
+    if (s == IPC_INVALID_SOCKET)
+      break;
+
+    uint32_t payload_len = 0;
+    int rc = RecvAllErr(s, &payload_len, 4);
+    if (rc != -1)
+    {
+      if (rc == 0)
+        INFO_LOG_FMT(CORE, "IpcBackend: peer closed (orderly FIN)");
+      else
+        WARN_LOG_FMT(CORE, "IpcBackend: recv error err={} — connection dropped "
+                           "(firewall/AV?), peer was alive {}ms",
+                     rc, std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::steady_clock::now().time_since_epoch())
+                            .count());
+      m_stop.store(true);
+      m_in_cv.notify_all();
+      break;
+    }
+
+    if (payload_len == 0 || payload_len > (1u << 20))
+    {
+      WARN_LOG_FMT(CORE, "IpcBackend: bogus payload_len={}", payload_len);
+      m_stop.store(true);
+      m_in_cv.notify_all();
+      break;
+    }
+
+    std::vector<uint8_t> payload(payload_len);
+    if (!RecvAll(s, payload.data(), payload_len))
+    {
+      INFO_LOG_FMT(CORE, "IpcBackend: incomplete payload (peer closed)");
+      m_stop.store(true);
+      m_in_cv.notify_all();
+      break;
+    }
+
+    const uint8_t tag = payload[0];
+    if (tag == IPC_TAG_ACTION)
+    {
+      constexpr size_t kExpect = 1 + 4 + sizeof(float) * 7 + sizeof(float) * 4;
+      if (payload.size() != kExpect)
+      {
+        WARN_LOG_FMT(CORE, "IpcBackend: ACTION wrong size {} != {}",
+                     payload.size(), kExpect);
+        continue;
+      }
+      uint32_t frame_id = 0;
+      std::memcpy(&frame_id, payload.data() + 1, 4);
+      const float* btn_probs  = reinterpret_cast<const float*>(payload.data() + 5);
+      const float* stick_vals = btn_probs + 7;
+      HandleAction(frame_id, btn_probs, stick_vals);
+    }
+    else if (tag == IPC_TAG_RESET)
+    {
+      if (payload.size() != 1 + 4)
+      {
+        WARN_LOG_FMT(CORE, "IpcBackend: RESET wrong size {}", payload.size());
+        continue;
+      }
+      uint32_t savestate_id = 0;
+      std::memcpy(&savestate_id, payload.data() + 1, 4);
+      INFO_LOG_FMT(CORE, "IpcBackend: RESET request (savestate_id={})", savestate_id);
+      if (m_reset_cb)
+        m_reset_cb(savestate_id);
+    }
+    else if (tag == IPC_TAG_PAUSE)
+    {
+      if (payload.size() != 1)
+      {
+        WARN_LOG_FMT(CORE, "IpcBackend: PAUSE wrong size {}", payload.size());
+        continue;
+      }
+      INFO_LOG_FMT(CORE, "IpcBackend: PAUSE request from peer");
+      // SetState() is host-thread-only and CPU::EnableStepping() deadlocks
+      // if called from a system thread, so route through QueueHostJob —
+      // it's threadsafe and the Qt event loop runs independently of CPU
+      // pause state, so this works symmetrically for both directions.
+      m_we_paused.store(true);
+      Core::QueueHostJob([] { Core::SetState(Core::State::Paused); });
+    }
+    else if (tag == IPC_TAG_RESUME)
+    {
+      if (payload.size() != 1)
+      {
+        WARN_LOG_FMT(CORE, "IpcBackend: RESUME wrong size {}", payload.size());
+        continue;
+      }
+      INFO_LOG_FMT(CORE, "IpcBackend: RESUME request from peer");
+      m_we_paused.store(false);
+      Core::QueueHostJob([] { Core::SetState(Core::State::Running); });
+    }
+    else if (tag == IPC_TAG_SHUTDOWN)
+    {
+      INFO_LOG_FMT(CORE, "IpcBackend: SHUTDOWN request from peer");
+      m_stop.store(true);
+      m_in_cv.notify_all();
+      break;
+    }
+    else
+    {
+      WARN_LOG_FMT(CORE, "IpcBackend: unknown tag {:#04x}", tag);
+    }
+  }
+
+  // Crash safety: if the connection drops while we hold a pause we
+  // issued, the user would be stranded with a frozen game.  Auto-resume
+  // on exit.  Only triggers if we caused the pause — a manual F10 leaves
+  // m_we_paused=false and this is a no-op.
+  if (m_we_paused.exchange(false))
+  {
+    INFO_LOG_FMT(CORE, "IpcBackend: receiver exiting while paused; "
+                       "auto-resuming so user isn't stranded");
+    Core::QueueHostJob([] { Core::SetState(Core::State::Running); });
+  }
+}
+
+void IpcBackend::HandleAction(uint32_t frame_id, const float* btn_probs,
+                              const float* stick_vals)
+{
+  // Stale-frame guard.  Originally `frame_id + 1 < latest` (one-frame slack),
+  // which dropped every action under RL because RLAgent.act() costs ~17ms vs
+  // a 16.7ms frame budget — Python is consistently a few frames behind and
+  // lag accumulates.  Confirmed by diagnostic logging 2026-05-04: only the
+  // first ~48 actions landed, then 100% rejection with the gap growing
+  // 2 → 14+ frames over a few seconds.
+  //
+  // Loosened to ~1 second of slack (kStaleWindow frames).  This still
+  // catches catastrophically-old actions (e.g., reconnect debris) but
+  // accepts all reasonable RL inference latency.  Python is the source of
+  // truth for actions in IpcBackend mode; the latest-wins m_pending slot
+  // already prevents unbounded queueing on the C++ side.
+  constexpr uint32_t kStaleWindow = 60;
+  const uint32_t latest = m_latest_sent_frame.load();
+  const bool stale =
+      (frame_id != 0 && latest > kStaleWindow && frame_id + kStaleWindow < latest);
+
+  // Diagnostic counters: keep until we've validated acceptance rate is
+  // healthy under the relaxed filter, then prune.  Throttled to every
+  // 60th event of each kind so the log doesn't flood.
+  static std::atomic<uint64_t> s_accepted{0};
+  static std::atomic<uint64_t> s_dropped{0};
+  if (stale)
+  {
+    const uint64_t n = s_dropped.fetch_add(1) + 1;
+    if (n == 1 || (n % 60) == 0)
+    {
+      const uint32_t gap = latest - frame_id;
+      WARN_LOG_FMT(CORE,
+                   "IpcBackend: STALE drop #{} frame_id={} latest_sent={} "
+                   "gap={} (accepted={} dropped={})",
+                   n, frame_id, latest, gap, s_accepted.load(), n);
+    }
+    return;
+  }
+
+  const uint64_t n = s_accepted.fetch_add(1) + 1;
+  if (n == 1 || (n % 60) == 0)
+  {
+    const uint32_t gap = (latest >= frame_id) ? (latest - frame_id) : 0;
+    INFO_LOG_FMT(CORE,
+                 "IpcBackend: ACCEPT #{} frame_id={} latest_sent={} gap={} "
+                 "(accepted={} dropped={})",
+                 n, frame_id, latest, gap, n, s_dropped.load());
+  }
+
+  const bool mirror_x = m_latest_mirror_x.load() != 0;
+  GCPadStatus pad     = DecodeOutput(btn_probs, stick_vals, mirror_x);
+
+  std::lock_guard<std::mutex> lk(m_out_mu);
+  m_last_output = pad;
+  m_has_output  = true;
+}
+
+void IpcBackend::StopThreads()
+{
+  m_stop.store(true);
+
+  // Closing the listen socket unblocks accept(); closing the client socket
+  // unblocks recv()/send() on either worker.
+  socket_t client = m_client_sock.exchange(IPC_INVALID_SOCKET);
+  IpcCloseSocket(client);
+  IpcCloseSocket(m_listen_sock);
+  m_listen_sock = IPC_INVALID_SOCKET;
+
+  m_in_cv.notify_all();
+
+  if (m_acceptor.joinable()) m_acceptor.join();
+  if (m_sender.joinable())   m_sender.join();
+  if (m_receiver.joinable()) m_receiver.join();
+}
+
+void IpcBackend::Shutdown()
+{
+  StopThreads();
+  m_client_connected.store(false);
+
+  std::lock_guard<std::mutex> lk(m_out_mu);
+  m_has_output = false;
+  std::memset(&m_last_output, 0, sizeof(m_last_output));
+  m_last_output.stickX      = 0x80;
+  m_last_output.stickY      = 0x80;
+  m_last_output.substickX   = 0x80;
+  m_last_output.substickY   = 0x80;
+  m_last_output.isConnected = true;
+}
+
 }  // namespace
 
 // ---------------------------------------------------------------------------
@@ -744,6 +1422,16 @@ bool AIController::Load(const std::string& onnx_path)
   Shutdown();
   auto backend = std::make_unique<LocalOnnxBackend>();
   if (!backend->Load(onnx_path))
+    return false;
+  m_backend = std::move(backend);
+  return true;
+}
+
+bool AIController::LoadIpc(int port, ResetCallback reset_cb)
+{
+  Shutdown();
+  auto backend = std::make_unique<IpcBackend>();
+  if (!backend->Listen(port, std::move(reset_cb)))
     return false;
   m_backend = std::move(backend);
   return true;
@@ -765,6 +1453,19 @@ bool AIController::IsLoaded() const { return m_backend != nullptr; }
 bool AIController::IsMatchActive() const
 {
   return m_phase_active && m_backend && m_backend->HasOutput();
+}
+
+uint32_t AIController::GetGamePhase()
+{
+  constexpr uint32_t CGAME_SINGLETON = 0x80373708;
+  uint32_t cGamePtr = Memory::Read_U32(CGAME_SINGLETON);
+  return (cGamePtr != 0) ? Memory::Read_U32(cGamePtr + 0x24) : 0;
+}
+
+bool AIController::IsGoalReplay()
+{
+  uint32_t phase = GetGamePhase();
+  return phase == 2 || phase == 3;
 }
 
 GCPadStatus AIController::GetLastOutput() const
@@ -849,6 +1550,9 @@ void AIController::OnFrameEnd(int controlled_port, bool mirror_x)
   frame.core_features = std::move(core_features);
   frame.reset_context = phase_changed;
   frame.mirror_x      = mirror_x;
+  frame.frame_id      = m_next_frame_id++;
+  frame.score_left    = Memory::Read_U16(Metadata::addressLeftSideScore);
+  frame.score_right   = Memory::Read_U16(Metadata::addressRightSideScore);
   m_backend->Submit(std::move(frame));
 
   // Dump emu-thread stats every ~10s.

@@ -215,6 +215,10 @@ std::string GetRerecords();
 // mirror_x: true if the AI's team attacks left (RIGHT team) — X coords are negated
 //           so the model always sees the canonical "attacks right" view.
 void InitAIController(const std::string& onnx_path, int controlled_port, bool mirror_x);
+// IPC backend variant: instead of running local ONNX, listen for a Python RL
+// trainer on TCP loopback port `ipc_port`.  The trainer sends actions; we
+// publish them through the same PlayController() path.
+void InitAIControllerIpc(int ipc_port, int controlled_port, bool mirror_x);
 void ShutdownAIController();
 bool IsUsingAIInputs();
 // Called once per rendered frame from Core::OnFrameEnd() — runs ONNX inference.

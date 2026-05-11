@@ -442,6 +442,9 @@ const Info<bool> MAIN_MOVIE_USE_NULL_BACKEND{{System::Main, "Movie", "UseNullBac
 const Info<std::string> MAIN_MOVIE_AI_MODEL_PATH{{System::Main, "Movie", "AIModelPath"}, ""};
 const Info<int> MAIN_MOVIE_AI_CONTROLLED_PORT{{System::Main, "Movie", "AIControlledPort"}, 0};
 const Info<bool> MAIN_MOVIE_AI_MIRROR_X{{System::Main, "Movie", "AIMirrorX"}, false};
+// >0 = listen on this TCP loopback port for an external (Python) inference
+// client; 0 = use the local ONNX backend with AIModelPath.
+const Info<int> MAIN_MOVIE_AI_IPC_PORT{{System::Main, "Movie", "AIIpcPort"}, 0};
 
 // Main.Input
 

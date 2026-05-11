@@ -335,16 +335,20 @@ void Init(const BootParameters& boot)
   }
 
   // AI Controller: initialize from INI at every game boot so the model works
-  // without needing a movie file to be playing.
+  // without needing a movie file to be playing.  AIIpcPort takes precedence
+  // over AIModelPath: a configured IPC port means an external Python trainer
+  // owns the policy, and AIModelPath is irrelevant.
   {
+    int ai_ipc_port = Config::Get(Config::MAIN_MOVIE_AI_IPC_PORT);
     std::string ai_model_path = Config::Get(Config::MAIN_MOVIE_AI_MODEL_PATH);
-    INFO_LOG_FMT(CORE, "Movie::Init — AIModelPath='{}'", ai_model_path);
-    if (!ai_model_path.empty())
-    {
-      int ai_port      = Config::Get(Config::MAIN_MOVIE_AI_CONTROLLED_PORT);
-      bool ai_mirror_x = Config::Get(Config::MAIN_MOVIE_AI_MIRROR_X);
+    INFO_LOG_FMT(CORE, "Movie::Init — AIIpcPort={} AIModelPath='{}'",
+                 ai_ipc_port, ai_model_path);
+    int ai_port = Config::Get(Config::MAIN_MOVIE_AI_CONTROLLED_PORT);
+    bool ai_mirror_x = Config::Get(Config::MAIN_MOVIE_AI_MIRROR_X);
+    if (ai_ipc_port > 0)
+      InitAIControllerIpc(ai_ipc_port, ai_port, ai_mirror_x);
+    else if (!ai_model_path.empty())
       InitAIController(ai_model_path, ai_port, ai_mirror_x);
-    }
   }
 }
 
@@ -1648,16 +1652,17 @@ bool PlayInput(const std::string& movie_path, std::optional<std::string>* savest
       }
     }
 
-    // Load AI controller from INI config if a model path is configured.
-    // The AI overrides inputs for the configured port each frame via PlayController().
+    // Load AI controller from INI config.  IPC port takes precedence over a
+    // local ONNX model path, mirroring Movie::Init above.
     {
+      int ai_ipc_port = Config::Get(Config::MAIN_MOVIE_AI_IPC_PORT);
       std::string ai_model_path = Config::Get(Config::MAIN_MOVIE_AI_MODEL_PATH);
-      if (!ai_model_path.empty())
-      {
-        int  ai_port     = Config::Get(Config::MAIN_MOVIE_AI_CONTROLLED_PORT);
-        bool ai_mirror_x = Config::Get(Config::MAIN_MOVIE_AI_MIRROR_X);
+      int ai_port = Config::Get(Config::MAIN_MOVIE_AI_CONTROLLED_PORT);
+      bool ai_mirror_x = Config::Get(Config::MAIN_MOVIE_AI_MIRROR_X);
+      if (ai_ipc_port > 0)
+        InitAIControllerIpc(ai_ipc_port, ai_port, ai_mirror_x);
+      else if (!ai_model_path.empty())
         InitAIController(ai_model_path, ai_port, ai_mirror_x);
-      }
     }
 
     if (!boolFoundOutputSav)
@@ -2018,9 +2023,10 @@ void PlayController(GCPadStatus* PadStatus, int controllerID)
     bool port_ok  = (controllerID == s_ai_controlled_port);
     if (++s_ai_log_counter % 120 == 1)
     {
-      INFO_LOG_FMT(CORE, "PlayController AI check: port={} loaded={} active={} port_ok={}",
-                   controllerID, loaded, active, port_ok);
+      INFO_LOG_FMT(CORE, "PlayController AI check: port={} loaded={} active={} port_ok={} phase={}",
+                   controllerID, loaded, active, port_ok, AIController::GetGamePhase());
     }
+
     if (loaded && active && port_ok)
     {
       GCPadStatus out = s_ai_controller->GetLastOutput();
@@ -2654,6 +2660,46 @@ void InitAIController(const std::string& onnx_path, int controlled_port, bool mi
 
   INFO_LOG_FMT(CORE, "AIController: active on port {} mirror_x={} model={}",
                s_ai_controlled_port, s_ai_mirror_x, onnx_path);
+}
+
+void InitAIControllerIpc(int ipc_port, int controlled_port, bool mirror_x)
+{
+  if (ipc_port <= 0 || ipc_port > 65535)
+  {
+    ERROR_LOG_FMT(CORE, "AIController: invalid IPC port {}", ipc_port);
+    return;
+  }
+
+  INFO_LOG_FMT(CORE, "AIController: initializing IPC backend on port {} (gc_port={} mirror={})",
+               ipc_port, controlled_port, mirror_x);
+
+  s_ai_controller = std::make_unique<AIController>();
+
+  // Reset callback: the IPC receiver thread will invoke this when the Python
+  // trainer sends a RESET control message.  TODO(rl-mvp): wire this to
+  // State::LoadFromBuffer of a savestate captured at game start.  For the
+  // MVP roundtrip test we just log; episode boundaries can be enforced
+  // entirely on the Python side until the savestate-pool design is settled.
+  AIController::ResetCallback reset_cb = [](uint32_t savestate_id) {
+    INFO_LOG_FMT(CORE, "AIController: IPC reset received (savestate_id={}); "
+                       "TODO wire to State::LoadFromBuffer",
+                 savestate_id);
+  };
+
+  if (!s_ai_controller->LoadIpc(ipc_port, std::move(reset_cb)))
+  {
+    ERROR_LOG_FMT(CORE, "AIController: failed to start IPC backend on port {}", ipc_port);
+    s_ai_controller.reset();
+    s_use_ai_inputs = false;
+    return;
+  }
+
+  s_ai_controlled_port = std::max(0, std::min(3, controlled_port));
+  s_ai_mirror_x        = mirror_x;
+  s_use_ai_inputs      = true;
+
+  INFO_LOG_FMT(CORE, "AIController: IPC active on port {} (gc_port={} mirror={})",
+               ipc_port, s_ai_controlled_port, s_ai_mirror_x);
 }
 
 void ShutdownAIController()

@@ -4,6 +4,8 @@
 #pragma once
 
 #include <array>
+#include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -38,9 +40,16 @@ constexpr int KV_CACHE_SIZE    = KV_CACHE_LAYERS * 2 * KV_CACHE_SEQ * KV_CACHE_D
 // ---------------------------------------------------------------------------
 struct AIInputFrame
 {
-  std::vector<float> core_features;     // CORE_FEATURE_DIM floats
+  std::vector<float> core_features;          // CORE_FEATURE_DIM floats
   bool               reset_context = false;  // backend zeros KV + prev_labels first
   bool               mirror_x      = false;  // stick_x sign flip in DecodeOutput
+
+  // Reward / episode-bookkeeping scalars used by the IpcBackend (Python RL
+  // trainer needs these alongside the feature vector to compute rewards and
+  // detect terminal events).  LocalOnnxBackend ignores them.
+  uint32_t frame_id    = 0;     // monotonically incremented per submitted frame
+  uint16_t score_left  = 0;
+  uint16_t score_right = 0;
 };
 
 // ---------------------------------------------------------------------------
@@ -76,11 +85,23 @@ public:
 class AIController
 {
 public:
+  // Reset callback signature for the IPC backend: invoked from a worker
+  // thread when the Python trainer sends a control message asking Dolphin to
+  // reload a savestate.  Implementations should marshal back to the host /
+  // emu thread before touching Core::State.
+  using ResetCallback = std::function<void(uint32_t savestate_id)>;
+
   AIController();
   ~AIController();
 
   // Load and start the local ONNX backend.  Returns false on any failure.
   bool Load(const std::string& onnx_path);
+
+  // Load and start the IPC backend.  Listens on TCP loopback `port` for a
+  // single Python client.  reset_cb is invoked from the IPC receiver thread
+  // when a reset control message arrives.  Returns false if bind/listen fails.
+  bool LoadIpc(int port, ResetCallback reset_cb);
+
   void Shutdown();
   bool IsLoaded() const;
 
@@ -94,6 +115,13 @@ public:
   // True when we're inside an active-play phase AND the backend has an
   // output to deliver.  PlayController() guards on this before injecting.
   bool IsMatchActive() const;
+
+  // True when the game is in the goal-replay/transition phase.
+  // Static so Movie.cpp can call it without a full inference session running.
+  static bool IsGoalReplay();
+
+  // Returns the raw eGameState value for logging.
+  static uint32_t GetGamePhase();
 
   // Delivered to PlayController() for the controlled port.  Stale by at
   // most one frame under normal operation (backend is keeping up).
@@ -110,6 +138,10 @@ private:
   // owns this; the backend only sees a reset_context boolean per frame.
   int  m_prev_phase_family = -1;
   bool m_phase_active      = false;
+
+  // Monotonic per-controller frame id; echoed by the IPC client for
+  // stale-frame detection.  Wraps at 2^32 (~828 days @ 60Hz, fine).
+  uint32_t m_next_frame_id = 1;
 };
 
 }  // namespace Movie
