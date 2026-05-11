@@ -139,6 +139,12 @@ private:
   int  m_prev_phase_family = -1;
   bool m_phase_active      = false;
 
+  // Phase 2 (goal celebration): emit a toggled-A pad each frame to skip the
+  // replay quickly. Lives here so the normal injection path in PlayController
+  // doesn't need a special case — GetLastOutput() returns this directly.
+  bool m_phase2_override = false;
+  bool m_phase2_press_a  = false;
+
   // Monotonic per-controller frame id; echoed by the IPC client for
   // stale-frame detection.  Wraps at 2^32 (~828 days @ 60Hz, fine).
   uint32_t m_next_frame_id = 1;

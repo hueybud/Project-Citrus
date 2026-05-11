@@ -1452,6 +1452,8 @@ bool AIController::IsLoaded() const { return m_backend != nullptr; }
 
 bool AIController::IsMatchActive() const
 {
+  if (m_phase2_override)
+    return true;
   return m_phase_active && m_backend && m_backend->HasOutput();
 }
 
@@ -1470,6 +1472,16 @@ bool AIController::IsGoalReplay()
 
 GCPadStatus AIController::GetLastOutput() const
 {
+  if (m_phase2_override)
+  {
+    GCPadStatus pad{};
+    pad.isConnected = true;
+    pad.button      = PAD_USE_ORIGIN;
+    pad.stickX = pad.stickY = pad.substickX = pad.substickY = 0x80;
+    if (m_phase2_press_a)
+      pad.button |= PAD_BUTTON_A;
+    return pad;
+  }
   if (!m_backend)
   {
     GCPadStatus pad{};
@@ -1502,6 +1514,20 @@ void AIController::OnFrameEnd(int controlled_port, bool mirror_x)
   constexpr uint32_t CGAME_SINGLETON = 0x80373708;
   uint32_t cGamePtr   = Memory::Read_U32(CGAME_SINGLETON);
   uint32_t game_phase = (cGamePtr != 0) ? Memory::Read_U32(cGamePtr + 0x24) : 0;
+
+  // Phase 2 = goal celebration. Alternate A / no-input each frame so the
+  // replay collapses fast. This bypasses inference entirely; GetLastOutput()
+  // returns the toggled pad and IsMatchActive() reports true.
+  if (game_phase == 2)
+  {
+    m_phase2_press_a = !m_phase2_press_a;
+    m_phase2_override = true;
+    m_prev_phase_family = -1;
+    m_phase_active = false;
+    invalidate_interval();
+    return;
+  }
+  m_phase2_override = false;
 
   // phase_family: 1=kickoff, 4=active play (phases 4 and 5), -1=everything else
   int phase_family = -1;
