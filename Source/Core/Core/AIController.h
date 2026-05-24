@@ -50,6 +50,12 @@ struct AIInputFrame
   uint32_t frame_id    = 0;     // monotonically incremented per submitted frame
   uint16_t score_left  = 0;
   uint16_t score_right = 0;
+  // Raw eGameState byte from cGame+0x24.  0=pre, 1=kickoff, 2=goal,
+  // 3=transition, 4/5=active play.  Exposed so the Python reward function
+  // can suppress shaping signals (e.g., stagnation) outside of active play
+  // — kickoff hold isn't agent choice, but the ball-x doesn't advance and
+  // would otherwise trigger STAGNATION repeatedly.
+  uint8_t  game_phase  = 0;
 };
 
 // ---------------------------------------------------------------------------

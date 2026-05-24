@@ -797,6 +797,10 @@ void LocalOnnxBackend::WorkerLoop()
 //     u8  reset_context    (1 = first frame after a phase / episode reset)
 //     u8  mirror_x         (1 = AI's team attacks left; X already flipped
 //                           in core_features, but Python mirrors stick output)
+//     u8  game_phase       (raw eGameState byte from cGame+0x24:
+//                           0=pre, 1=kickoff, 2=goal, 3=transition,
+//                           4/5=active play.  Python uses this to gate
+//                           shaping rewards on active play only.)
 //     u16 score_left
 //     u16 score_right
 //     f32 core_features[CORE_FEATURE_DIM]   (183 floats = 732 bytes)
@@ -1149,6 +1153,7 @@ void IpcBackend::SenderLoop()
     constexpr size_t kFeatBytes  = sizeof(float) * AIModelDims::CORE_FEATURE_DIM;
     constexpr uint32_t kPayloadBytes =
         1 /* tag */ + 4 /* frame_id */ + 1 /* reset */ + 1 /* mirror */ +
+        1 /* game_phase */ +
         2 /* score_left */ + 2 /* score_right */ +
         static_cast<uint32_t>(kFeatBytes);
 
@@ -1165,8 +1170,9 @@ void IpcBackend::SenderLoop()
     append(&frame.frame_id,    4);
     const uint8_t reset_b  = frame.reset_context ? 1 : 0;
     const uint8_t mirror_b = frame.mirror_x      ? 1 : 0;
-    append(&reset_b,  1);
-    append(&mirror_b, 1);
+    append(&reset_b,         1);
+    append(&mirror_b,        1);
+    append(&frame.game_phase, 1);
     append(&frame.score_left,  2);
     append(&frame.score_right, 2);
     append(frame.core_features.data(), kFeatBytes);
@@ -1579,6 +1585,7 @@ void AIController::OnFrameEnd(int controlled_port, bool mirror_x)
   frame.frame_id      = m_next_frame_id++;
   frame.score_left    = Memory::Read_U16(Metadata::addressLeftSideScore);
   frame.score_right   = Memory::Read_U16(Metadata::addressRightSideScore);
+  frame.game_phase    = static_cast<uint8_t>(game_phase & 0xFF);
   m_backend->Submit(std::move(frame));
 
   // Dump emu-thread stats every ~10s.
