@@ -74,8 +74,15 @@ bool BootCore(std::unique_ptr<BootParameters> boot, const WindowSystemInfo& wsi)
 
   // overwrite savestate texture cache option to always be false. keeps savestates to minimum size
   Config::SetBaseOrCurrent(Config::GFX_SAVE_TEXTURE_CACHE_TO_STATE, false);
+  // Run unlimited (0.0f) when null backend is paired with DTM playback (the CITF
+  // converter path) OR when an RL IPC port is configured.  RL training has no DTM,
+  // so without the AIIpcPort clause it would be pinned to 1.0x realtime.
+  const bool ai_ipc_active = Config::Get(Config::MAIN_MOVIE_AI_IPC_PORT) > 0;
   const float target_speed =
-      (Config::Get(Config::MAIN_MOVIE_USE_NULL_BACKEND) && Movie::IsPlayingInput()) ? 0.0f : 1.0f;
+      ((Config::Get(Config::MAIN_MOVIE_USE_NULL_BACKEND) && Movie::IsPlayingInput()) ||
+       ai_ipc_active) ?
+          0.0f :
+          1.0f;
   Config::SetBaseOrCurrent(Config::MAIN_EMULATION_SPEED, target_speed);
 
   // set replay and default gecko codes bool value to false for this instance of core
