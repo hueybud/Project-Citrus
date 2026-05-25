@@ -600,6 +600,17 @@ PRIVATE
   ZLIB::ZLIB
 )
 
+# AIController.cpp pulls in ONNX Runtime's C++ wrapper headers, which use
+# `throw` and require exceptions.  The rest of Dolphin compiles with
+# -fno-exceptions (set in the top-level CMakeLists), so we override here
+# for just this translation unit.  Same precedent as
+# Externals/HDiffPatch/CMakeLists.txt:47.  Windows MSVC doesn't need this
+# (exceptions are on by default there).
+if (NOT MSVC)
+  set_source_files_properties(AIController.cpp PROPERTIES
+    COMPILE_OPTIONS "-fexceptions")
+endif()
+
 if ((DEFINED CMAKE_ANDROID_ARCH_ABI AND CMAKE_ANDROID_ARCH_ABI MATCHES "x86|x86_64") OR
     (NOT DEFINED CMAKE_ANDROID_ARCH_ABI AND _M_X86))
   target_link_libraries(core PRIVATE bdisasm)
