@@ -63,6 +63,20 @@ bundled with Dolphin and used if they're not installed on your system. CMake
 will inform you if a bundled library is used or if you need to install any
 missing packages yourself.
 
+### Linux Prerequisites (Debian/Ubuntu)
+
+The headless (`-DENABLE_QT=OFF`) build needs the packages listed in the
+[Dockerfile](Dockerfile). For the Qt frontend, also install Qt5 development
+packages and Ninja:
+
+```sh
+sudo apt install -y qtbase5-dev qtbase5-private-dev qttools5-dev \
+    qttools5-dev-tools libqt5svg5-dev ninja-build
+```
+
+If CMake reports any other missing library, install its `-dev` package and
+re-run `cmake`.
+
 Make sure to pull submodules before building:
 ```sh
 git submodule update --init
