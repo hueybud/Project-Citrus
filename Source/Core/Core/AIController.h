@@ -56,6 +56,12 @@ struct AIInputFrame
   // — kickoff hold isn't agent choice, but the ball-x doesn't advance and
   // would otherwise trigger STAGNATION repeatedly.
   uint8_t  game_phase  = 0;
+  // Raw byte from Metadata::addressMatchEnd (0x80400001) — set to 1 by the
+  // game when the match ends (clock expired or mercy rule).  Same flag the
+  // CITF capture flow uses.  Python latches the 0→1 transition and issues a
+  // RESET to load a savestate; one or more STATE packets with match_end=1
+  // can show up before the savestate fires, all harmless duplicates.
+  uint8_t  match_end   = 0;
 };
 
 // ---------------------------------------------------------------------------
@@ -154,6 +160,12 @@ private:
   // Monotonic per-controller frame id; echoed by the IPC client for
   // stale-frame detection.  Wraps at 2^32 (~828 days @ 60Hz, fine).
   uint32_t m_next_frame_id = 1;
+
+  // Last observed Metadata::addressMatchEnd byte.  Used to fire a forced
+  // STATE submit on the 0→1 rising edge so Python sees the signal even
+  // when the phase gates would otherwise early-return (e.g., final-goal
+  // celebration or post-match screen).
+  uint8_t  m_prev_match_end_raw = 0;
 };
 
 }  // namespace Movie

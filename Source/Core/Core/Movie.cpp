@@ -2685,14 +2685,35 @@ void InitAIControllerIpc(int ipc_port, int controlled_port, bool mirror_x)
   s_ai_controller = std::make_unique<AIController>();
 
   // Reset callback: the IPC receiver thread will invoke this when the Python
-  // trainer sends a RESET control message.  TODO(rl-mvp): wire this to
-  // State::LoadFromBuffer of a savestate captured at game start.  For the
-  // MVP roundtrip test we just log; episode boundaries can be enforced
-  // entirely on the Python side until the savestate-pool design is settled.
+  // trainer sends a RESET control message (typically after a match_end=1
+  // STATE packet).  Maps savestate_id to a .sav next to the Dolphin binary
+  // and loads it via Core::QueueHostJob — State::LoadAs is host-thread-only
+  // and a direct call from the IPC receiver thread would deadlock (see
+  // dolphin_pause_resume.md for the same gotcha on SetState).
   AIController::ResetCallback reset_cb = [](uint32_t savestate_id) {
-    INFO_LOG_FMT(CORE, "AIController: IPC reset received (savestate_id={}); "
-                       "TODO wire to State::LoadFromBuffer",
-                 savestate_id);
+    // Stadium-diversity savestates captured at first active-play frame after
+    // kickoff: Daisy/Toad (P1, left) vs Peach/Toad (CPU, right), AI on port 0.
+    static constexpr const char* kSavestateFiles[] = {
+        "rl_palace.sav",
+        "rl_underground.sav",
+        "rl_battle_dome.sav",
+    };
+    constexpr uint32_t kNumSavestates =
+        static_cast<uint32_t>(sizeof(kSavestateFiles) / sizeof(kSavestateFiles[0]));
+
+    if (savestate_id >= kNumSavestates)
+    {
+      WARN_LOG_FMT(CORE, "AIController: RESET savestate_id={} out of range "
+                         "[0,{}); ignoring",
+                   savestate_id, kNumSavestates);
+      return;
+    }
+
+    const std::string path = File::GetExeDirectory() + DIR_SEP +
+                             kSavestateFiles[savestate_id];
+    INFO_LOG_FMT(CORE, "AIController: RESET → loading savestate id={} path={}",
+                 savestate_id, path);
+    Core::QueueHostJob([path]() { State::LoadAs(path); });
   };
 
   if (!s_ai_controller->LoadIpc(ipc_port, std::move(reset_cb)))

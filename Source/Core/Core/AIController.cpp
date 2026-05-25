@@ -801,6 +801,10 @@ void LocalOnnxBackend::WorkerLoop()
 //                           0=pre, 1=kickoff, 2=goal, 3=transition,
 //                           4/5=active play.  Python uses this to gate
 //                           shaping rewards on active play only.)
+//     u8  match_end        (raw byte from Metadata::addressMatchEnd /
+//                           0x80400001 — same flag the CITF flow uses.
+//                           Python latches the 0→1 transition and issues a
+//                           RESET to load a savestate.)
 //     u16 score_left
 //     u16 score_right
 //     f32 core_features[CORE_FEATURE_DIM]   (183 floats = 732 bytes)
@@ -1153,7 +1157,7 @@ void IpcBackend::SenderLoop()
     constexpr size_t kFeatBytes  = sizeof(float) * AIModelDims::CORE_FEATURE_DIM;
     constexpr uint32_t kPayloadBytes =
         1 /* tag */ + 4 /* frame_id */ + 1 /* reset */ + 1 /* mirror */ +
-        1 /* game_phase */ +
+        1 /* game_phase */ + 1 /* match_end */ +
         2 /* score_left */ + 2 /* score_right */ +
         static_cast<uint32_t>(kFeatBytes);
 
@@ -1173,6 +1177,7 @@ void IpcBackend::SenderLoop()
     append(&reset_b,         1);
     append(&mirror_b,        1);
     append(&frame.game_phase, 1);
+    append(&frame.match_end,  1);
     append(&frame.score_left,  2);
     append(&frame.score_right, 2);
     append(frame.core_features.data(), kFeatBytes);
@@ -1516,10 +1521,41 @@ void AIController::OnFrameEnd(int controlled_port, bool mirror_x)
     return;
   }
 
+  // Read match-end byte first.  The game sets this (Metadata::addressMatchEnd,
+  // 0x80400001) when the match ends — same flag the CITF capture flow uses.
+  // We need to surface it to Python BEFORE the phase early-returns below,
+  // because match-end can flip during phases the AI controller normally
+  // skips (goal celebration on the winning goal, post-match screen, etc.)
+  // and Python must see it to issue a savestate RESET.
+  const uint8_t match_end_raw  = Memory::Read_U8(Metadata::addressMatchEnd);
+  const bool    match_end_rise = (match_end_raw != 0 && m_prev_match_end_raw == 0);
+  m_prev_match_end_raw = match_end_raw;
+
   // Read game phase to detect segment boundaries (mirrors build_dataset.py segmentation).
   constexpr uint32_t CGAME_SINGLETON = 0x80373708;
   uint32_t cGamePtr   = Memory::Read_U32(CGAME_SINGLETON);
   uint32_t game_phase = (cGamePtr != 0) ? Memory::Read_U32(cGamePtr + 0x24) : 0;
+
+  // On the match-end rising edge, push a synthetic STATE so Python sees the
+  // signal even if we're about to early-return for a non-active phase.
+  // Features are zeroed (terminal frame — Python won't condition on them);
+  // scores + match_end are accurate.  Idempotent: if the regular Submit
+  // below also fires this frame, Python just gets a duplicate match_end=1.
+  if (match_end_rise)
+  {
+    INFO_LOG_FMT(CORE, "AIController: match_end rising edge (phase={}); "
+                       "forcing synthetic STATE submit", game_phase);
+    AIInputFrame frame;
+    frame.core_features.assign(AIModelDims::CORE_FEATURE_DIM, 0.0f);
+    frame.reset_context = true;
+    frame.mirror_x      = mirror_x;
+    frame.frame_id      = m_next_frame_id++;
+    frame.score_left    = Memory::Read_U16(Metadata::addressLeftSideScore);
+    frame.score_right   = Memory::Read_U16(Metadata::addressRightSideScore);
+    frame.game_phase    = static_cast<uint8_t>(game_phase & 0xFF);
+    frame.match_end     = 1;
+    m_backend->Submit(std::move(frame));
+  }
 
   // Phase 2 = goal celebration. Alternate A / no-input each frame so the
   // replay collapses fast. This bypasses inference entirely; GetLastOutput()
@@ -1586,6 +1622,7 @@ void AIController::OnFrameEnd(int controlled_port, bool mirror_x)
   frame.score_left    = Memory::Read_U16(Metadata::addressLeftSideScore);
   frame.score_right   = Memory::Read_U16(Metadata::addressRightSideScore);
   frame.game_phase    = static_cast<uint8_t>(game_phase & 0xFF);
+  frame.match_end     = match_end_raw ? 1 : 0;
   m_backend->Submit(std::move(frame));
 
   // Dump emu-thread stats every ~10s.
