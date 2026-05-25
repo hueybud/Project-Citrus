@@ -2274,7 +2274,9 @@ void EndPlayInput(bool cont)
     ASSERT(IsMovieActive());
 
     s_playMode = PlayMode::Recording;
-    Common::SetEnableAlert(Config::Get(Config::MAIN_USE_PANIC_HANDLERS));
+    // Keep alerts suppressed if an AI controller is still active (it manages its own restore).
+    if (!s_use_ai_inputs)
+      Common::SetEnableAlert(Config::Get(Config::MAIN_USE_PANIC_HANDLERS));
     Core::DisplayMessage("Reached movie end. Resuming recording.", 2000);
   }
   else if (s_playMode != PlayMode::None)
@@ -2304,7 +2306,9 @@ void EndPlayInput(bool cont)
       StateAuxillary::setPostPort();
     }
     s_playMode = PlayMode::None;
-    Common::SetEnableAlert(Config::Get(Config::MAIN_USE_PANIC_HANDLERS));
+    // Keep alerts suppressed if an AI controller is still active (it manages its own restore).
+    if (!s_use_ai_inputs)
+      Common::SetEnableAlert(Config::Get(Config::MAIN_USE_PANIC_HANDLERS));
     Core::DisplayMessage("Movie End.", 2000);
     s_bRecordingFromSaveState = false;
     // we don't clear these things because otherwise we can't resume playback if we load a movie
@@ -2658,6 +2662,11 @@ void InitAIController(const std::string& onnx_path, int controlled_port, bool mi
   s_ai_mirror_x        = mirror_x;
   s_use_ai_inputs      = true;
 
+  // Suppress panic alert dialogs during AI control. The model occasionally drives the game
+  // into states that trip "Invalid read"/"Unable to resolve" panics, and the modal dialog
+  // stalls the emulation thread until dismissed. DTM/CITF playback does the same in PlayInput().
+  Common::SetEnableAlert(false);
+
   INFO_LOG_FMT(CORE, "AIController: active on port {} mirror_x={} model={}",
                s_ai_controlled_port, s_ai_mirror_x, onnx_path);
 }
@@ -2698,6 +2707,10 @@ void InitAIControllerIpc(int ipc_port, int controlled_port, bool mirror_x)
   s_ai_mirror_x        = mirror_x;
   s_use_ai_inputs      = true;
 
+  // Suppress panic alert dialogs during AI/RL control (see InitAIController for rationale).
+  // Especially important for headless RL runs where there is no Qt window to dismiss the modal.
+  Common::SetEnableAlert(false);
+
   INFO_LOG_FMT(CORE, "AIController: IPC active on port {} (gc_port={} mirror={})",
                ipc_port, s_ai_controlled_port, s_ai_mirror_x);
 }
@@ -2708,6 +2721,8 @@ void ShutdownAIController()
   {
     s_ai_controller->Shutdown();
     s_ai_controller.reset();
+    // Restore panic alerts to the user's configured setting (we suppressed them on init).
+    Common::SetEnableAlert(Config::Get(Config::MAIN_USE_PANIC_HANDLERS));
   }
   s_use_ai_inputs = false;
 }
