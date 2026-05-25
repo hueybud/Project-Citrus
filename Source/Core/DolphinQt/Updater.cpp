@@ -51,6 +51,9 @@ void Updater::OnUpdateAvailable(std::string info)
   // bool later = false;
   m_update_available = true;
 
+#ifdef _WIN32
+  // TODO(linux): Citrus auto-update flow (APPDATA lookup + Citrus Launcher.exe spawn)
+  // is Windows-only. Re-enable on Linux when a cross-platform updater path exists.
   char* appDataPath;
   size_t len;
   _dupenv_s(&appDataPath, &len, "APPDATA");
@@ -134,6 +137,7 @@ void Updater::OnUpdateAvailable(std::string info)
     layout->addWidget(buttons);
 
     return dialog->exec();
-    }); 
+    });
   }
+#endif
 }

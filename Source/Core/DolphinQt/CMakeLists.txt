@@ -51,6 +51,8 @@ add_executable(dolphin-emu
   SearchBar.h
   Settings.cpp
   Settings.h
+  StatViewer.cpp
+  StatViewer.h
   ToolBar.cpp
   ToolBar.h
   Translation.cpp

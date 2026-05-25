@@ -1160,7 +1160,11 @@ void NetPlayDialog::OnLoginError(CitrusRequest::LoginError error)
 
     connect(projectcitrus1, &QPushButton::clicked, this, [userJSONPath, dialog1]() {
       std::string pathToAppData = "\"" + userJSONPath + "\"";
+#ifdef _WIN32
+      // TODO(linux): Citrus user-file open action is Windows-only. Re-enable on Linux
+      // by routing through QDesktopServices::openUrl or xdg-open.
       ShellExecuteA(NULL, "open", &pathToAppData[0], NULL, NULL, SW_HIDE);
+#endif
       dialog1->close();
     });
 
@@ -1191,12 +1195,16 @@ void NetPlayDialog::OnLoginError(CitrusRequest::LoginError error)
 
     connect(projectcitrus, &QPushButton::clicked, this, [citrusLauncherEXEPath]() {
       std::string pathToAppData = "\"" + citrusLauncherEXEPath + "\"";
+#ifdef _WIN32
+      // TODO(linux): Citrus Launcher .exe spawn is Windows-only. Re-enable on Linux
+      // once a cross-platform launcher path / process spawn is in place.
       STARTUPINFO si;
       PROCESS_INFORMATION pi;
       memset(&si, 0, sizeof(si));
       si.cb = sizeof(si);
       CreateProcessA(NULL, &pathToAppData[0], NULL, NULL, TRUE, CREATE_NO_WINDOW, NULL, NULL,
                      (LPSTARTUPINFOA)&si, &pi);
+#endif
     });
 
     auto* layout = new QVBoxLayout;
