@@ -82,6 +82,32 @@ Make sure to pull submodules before building:
 git submodule update --init
 ```
 
+### ONNX Runtime (Citrus-specific, required for all platforms)
+
+Citrus links against ONNX Runtime for the AI controller. The prebuilt
+binaries are not committed to the repo (large platform-specific blobs);
+CMake will fail with `ONNX Runtime shared library not found` until you
+stage them under `Externals/onnxruntime/`. Headless / nogui builds need
+this too — `AIController.cpp` links the lib even when the local ONNX path
+isn't used at runtime.
+
+**Linux x64:**
+
+```sh
+cd Externals/onnxruntime
+VER=1.21.0
+wget https://github.com/microsoft/onnxruntime/releases/download/v${VER}/onnxruntime-linux-x64-${VER}.tgz
+tar xzf onnxruntime-linux-x64-${VER}.tgz
+mkdir -p linux-x64/lib
+cp onnxruntime-linux-x64-${VER}/lib/libonnxruntime.so* linux-x64/lib/
+cp -n onnxruntime-linux-x64-${VER}/include/* include/ 2>/dev/null || true
+rm -rf onnxruntime-linux-x64-${VER} onnxruntime-linux-x64-${VER}.tgz
+```
+
+**Windows x64:** see `Externals/onnxruntime/README.md` for the PowerShell
+one-liner. Same idea: drop `onnxruntime.lib` under `win-x64/lib/` and
+`onnxruntime.dll` under `win-x64/bin/`.
+
 ### macOS Build Steps:
 
 A binary supporting a single architecture can be built using the following steps: 
