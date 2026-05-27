@@ -445,6 +445,13 @@ const Info<bool> MAIN_MOVIE_AI_MIRROR_X{{System::Main, "Movie", "AIMirrorX"}, fa
 // >0 = listen on this TCP loopback port for an external (Python) inference
 // client; 0 = use the local ONNX backend with AIModelPath.
 const Info<int> MAIN_MOVIE_AI_IPC_PORT{{System::Main, "Movie", "AIIpcPort"}, 0};
+// When true (and AIIpcPort > 0), OnFrameEnd blocks until the Python trainer
+// returns an action echoing the submitted frame_id (with a short watchdog
+// timeout).  This pins the emulator's frame cadence to Python's response
+// rate — eliminating free-run drift, drained frames, and CPU contention
+// between N parallel workers and the trainer driver process.  Required for
+// scaling batched RL training cleanly; harmless for single-env when off.
+const Info<bool> MAIN_MOVIE_AI_SYNCHRONOUS{{System::Main, "Movie", "AISynchronous"}, false};
 
 // Main.Input
 

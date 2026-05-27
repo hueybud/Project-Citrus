@@ -956,13 +956,14 @@ public:
   IpcBackend() = default;
   ~IpcBackend() override { Shutdown(); }
 
-  bool Listen(int port, AIController::ResetCallback reset_cb);
+  bool Listen(int port, AIController::ResetCallback reset_cb, bool synchronous);
 
   // AIInferenceBackend
   void        Submit(AIInputFrame frame) override;
   GCPadStatus GetLastOutput() const override;
   bool        HasOutput() const override;
   void        Shutdown() override;
+  void        WaitForAction(uint32_t target_frame_id) override;
 
 private:
   void AcceptLoop();
@@ -1012,9 +1013,24 @@ private:
   // Python crashed mid-update), the receiver loop auto-resumes on exit so
   // the user isn't stranded with a frozen game.
   std::atomic<bool> m_we_paused{false};
+
+  // ── Synchronous pacing (see AIInferenceBackend::WaitForAction) ─────────
+  // When m_synchronous is true, OnFrameEnd calls WaitForAction(frame_id)
+  // after Submit(); we block until HandleAction lands an action whose
+  // frame_id >= the submitted id, or until the watchdog fires.  This pins
+  // the emulator's frame cadence to the trainer's response rate so N
+  // parallel workers don't free-run and starve the trainer of CPU.
+  std::atomic<bool>           m_synchronous{false};
+  mutable std::mutex          m_action_mu;
+  std::condition_variable     m_action_cv;
+  std::atomic<uint32_t>       m_last_action_frame_id{0};
+  // Watchdog: if Python doesn't respond within this many ms we proceed
+  // with the cached action.  Bounds the damage of a slow/dead trainer to
+  // one frame per env instead of an indefinite emu-thread stall.
+  static constexpr uint32_t   kSyncTimeoutMs = 200;
 };
 
-bool IpcBackend::Listen(int port, AIController::ResetCallback reset_cb)
+bool IpcBackend::Listen(int port, AIController::ResetCallback reset_cb, bool synchronous)
 {
   Shutdown();
 
@@ -1026,6 +1042,10 @@ bool IpcBackend::Listen(int port, AIController::ResetCallback reset_cb)
 
   m_port     = port;
   m_reset_cb = std::move(reset_cb);
+  m_synchronous.store(synchronous);
+  if (synchronous)
+    INFO_LOG_FMT(CORE, "IpcBackend: synchronous pacing ENABLED "
+                       "(watchdog={}ms)", kSyncTimeoutMs);
 
   m_listen_sock = ::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
   if (m_listen_sock == IPC_INVALID_SOCKET)
@@ -1381,9 +1401,56 @@ void IpcBackend::HandleAction(uint32_t frame_id, const float* btn_probs,
   const bool mirror_x = m_latest_mirror_x.load() != 0;
   GCPadStatus pad     = DecodeOutput(btn_probs, stick_vals, mirror_x);
 
-  std::lock_guard<std::mutex> lk(m_out_mu);
-  m_last_output = pad;
-  m_has_output  = true;
+  {
+    std::lock_guard<std::mutex> lk(m_out_mu);
+    m_last_output = pad;
+    m_has_output  = true;
+  }
+
+  // Release any emu-thread sync-wait that was parked on this frame_id.
+  // Stored under m_action_mu so a concurrent WaitForAction sees a
+  // consistent (id-store + notify) sequence; atomic alone would race with
+  // the wait_until predicate evaluation.
+  {
+    std::lock_guard<std::mutex> lk(m_action_mu);
+    m_last_action_frame_id.store(frame_id);
+  }
+  m_action_cv.notify_all();
+}
+
+void IpcBackend::WaitForAction(uint32_t target_frame_id)
+{
+  // Cheap fast-paths first — keep emu-thread overhead near zero when sync
+  // is disabled, the trainer hasn't connected yet, or we're shutting down.
+  if (!m_synchronous.load())
+    return;
+  if (!m_client_connected.load() || m_stop.load())
+    return;
+  if (m_last_action_frame_id.load() >= target_frame_id)
+    return;
+
+  std::unique_lock<std::mutex> lk(m_action_mu);
+  const auto deadline = std::chrono::steady_clock::now() +
+                        std::chrono::milliseconds(kSyncTimeoutMs);
+  const bool ok = m_action_cv.wait_until(lk, deadline, [this, target_frame_id] {
+    return m_stop.load() || !m_client_connected.load() ||
+           m_last_action_frame_id.load() >= target_frame_id;
+  });
+  if (!ok)
+  {
+    // Watchdog fired.  Caller will reuse the cached pad for this frame;
+    // log sparsely so a persistently slow Python doesn't flood logs.
+    static std::atomic<uint64_t> s_sync_timeouts{0};
+    const uint64_t n = s_sync_timeouts.fetch_add(1) + 1;
+    if (n == 1 || (n % 60) == 0)
+    {
+      WARN_LOG_FMT(CORE,
+                   "IpcBackend: sync-wait TIMEOUT #{} target_frame={} "
+                   "last_action={} (timeout={}ms)",
+                   n, target_frame_id, m_last_action_frame_id.load(),
+                   kSyncTimeoutMs);
+    }
+  }
 }
 
 void IpcBackend::StopThreads()
@@ -1398,6 +1465,9 @@ void IpcBackend::StopThreads()
   m_listen_sock = IPC_INVALID_SOCKET;
 
   m_in_cv.notify_all();
+  // Also wake any emu thread parked in WaitForAction so shutdown doesn't
+  // wait out the watchdog (its predicate checks m_stop).
+  m_action_cv.notify_all();
 
   if (m_acceptor.joinable()) m_acceptor.join();
   if (m_sender.joinable())   m_sender.join();
@@ -1438,11 +1508,11 @@ bool AIController::Load(const std::string& onnx_path)
   return true;
 }
 
-bool AIController::LoadIpc(int port, ResetCallback reset_cb)
+bool AIController::LoadIpc(int port, ResetCallback reset_cb, bool synchronous)
 {
   Shutdown();
   auto backend = std::make_unique<IpcBackend>();
-  if (!backend->Listen(port, std::move(reset_cb)))
+  if (!backend->Listen(port, std::move(reset_cb), synchronous))
     return false;
   m_backend = std::move(backend);
   return true;
@@ -1613,7 +1683,8 @@ void AIController::OnFrameEnd(int controlled_port, bool mirror_x)
   s_stats_gs.Push(ms_gs);
   s_last_frame_end = t_gs_end;
 
-  // Hand off to the worker — non-blocking.
+  // Hand off to the worker — non-blocking under default pacing, blocking
+  // under IPC synchronous pacing (see WaitForAction below).
   AIInputFrame frame;
   frame.core_features = std::move(core_features);
   frame.reset_context = phase_changed;
@@ -1623,7 +1694,15 @@ void AIController::OnFrameEnd(int controlled_port, bool mirror_x)
   frame.score_right   = Memory::Read_U16(Metadata::addressRightSideScore);
   frame.game_phase    = static_cast<uint8_t>(game_phase & 0xFF);
   frame.match_end     = match_end_raw ? 1 : 0;
+  const uint32_t submitted_frame_id = frame.frame_id;
   m_backend->Submit(std::move(frame));
+
+  // Synchronous pacing hook.  No-op unless the IPC backend was opened with
+  // synchronous=true; in that case this blocks (with a short watchdog)
+  // until Python has returned an action for submitted_frame_id, pinning
+  // the emulator to the trainer's response rate.  See
+  // AIInferenceBackend::WaitForAction and IpcBackend::WaitForAction.
+  m_backend->WaitForAction(submitted_frame_id);
 
   // Dump emu-thread stats every ~10s.
   if (s_stats_gs.Full())

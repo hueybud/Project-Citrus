@@ -87,6 +87,15 @@ public:
   virtual GCPadStatus GetLastOutput() const           = 0;
   virtual bool        HasOutput() const               = 0;
   virtual void        Shutdown()                      = 0;
+
+  // Synchronous pacing hook.  Called by AIController::OnFrameEnd immediately
+  // after Submit(frame_id) when the trainer wants the emulator to wait for
+  // its action before producing the next frame.  Default no-op = free-run
+  // (LocalOnnxBackend behavior); IpcBackend overrides to block until either
+  // an ACTION echoing target_frame_id arrives or a short watchdog elapses.
+  // Must tolerate spurious wakeups, disconnects, and shutdown — never hang
+  // the emu thread indefinitely.
+  virtual void WaitForAction(uint32_t /*target_frame_id*/) {}
 };
 
 // ---------------------------------------------------------------------------
@@ -112,7 +121,9 @@ public:
   // Load and start the IPC backend.  Listens on TCP loopback `port` for a
   // single Python client.  reset_cb is invoked from the IPC receiver thread
   // when a reset control message arrives.  Returns false if bind/listen fails.
-  bool LoadIpc(int port, ResetCallback reset_cb);
+  // synchronous=true makes OnFrameEnd wait for Python's action each frame
+  // (see AIInferenceBackend::WaitForAction).
+  bool LoadIpc(int port, ResetCallback reset_cb, bool synchronous);
 
   void Shutdown();
   bool IsLoaded() const;

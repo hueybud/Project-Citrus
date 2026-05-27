@@ -2716,7 +2716,8 @@ void InitAIControllerIpc(int ipc_port, int controlled_port, bool mirror_x)
     Core::QueueHostJob([path]() { State::LoadAs(path); });
   };
 
-  if (!s_ai_controller->LoadIpc(ipc_port, std::move(reset_cb)))
+  const bool ai_synchronous = Config::Get(Config::MAIN_MOVIE_AI_SYNCHRONOUS);
+  if (!s_ai_controller->LoadIpc(ipc_port, std::move(reset_cb), ai_synchronous))
   {
     ERROR_LOG_FMT(CORE, "AIController: failed to start IPC backend on port {}", ipc_port);
     s_ai_controller.reset();
@@ -2732,8 +2733,8 @@ void InitAIControllerIpc(int ipc_port, int controlled_port, bool mirror_x)
   // Especially important for headless RL runs where there is no Qt window to dismiss the modal.
   Common::SetEnableAlert(false);
 
-  INFO_LOG_FMT(CORE, "AIController: IPC active on port {} (gc_port={} mirror={})",
-               ipc_port, s_ai_controlled_port, s_ai_mirror_x);
+  INFO_LOG_FMT(CORE, "AIController: IPC active on port {} (gc_port={} mirror={} synchronous={})",
+               ipc_port, s_ai_controlled_port, s_ai_mirror_x, ai_synchronous);
 }
 
 void ShutdownAIController()
