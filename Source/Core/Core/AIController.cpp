@@ -1329,6 +1329,14 @@ void IpcBackend::ReceiverLoop()
       INFO_LOG_FMT(CORE, "IpcBackend: SHUTDOWN request from peer");
       m_stop.store(true);
       m_in_cv.notify_all();
+      // Ask the host thread to actually stop the emulator.  Without
+      // this the receiver thread exits but Dolphin's main loop keeps
+      // running; the Python trainer then has to wait for its kill
+      // timeout and SIGKILL the process every restart -- ~10s of pure
+      // wall-clock waste per teardown.  Core::Stop must be called on
+      // the host thread (see dolphin_pause_resume.md for the
+      // emu-thread-vs-host-thread gotcha that also bit pause/resume).
+      Core::QueueHostJob([] { Core::Stop(); });
       break;
     }
     else
